@@ -42,7 +42,7 @@ Strata tools currently available to it.
 
 ## See Strata answer from a terminal
 
-Use the official MCP Inspector to list the hosted tools:
+Use the official MCP Inspector (Node.js 22.7.5+) to list the hosted tools:
 
 ```sh
 npx -y @modelcontextprotocol/inspector --cli \
