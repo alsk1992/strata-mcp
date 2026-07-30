@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://stratabook.app/docs/agent-mcp">Documentation</a>
+  <a href="https://stratabook.org/docs/agent-mcp">Documentation</a>
   ·
   <a href="https://github.com/alsk1992/strata-sdk-ts">TypeScript</a>
   ·
@@ -164,8 +164,8 @@ sign, or submit transactions and never asks for wallet or private-key material.
 
 ## Resources
 
-- [Agent quick start](https://stratabook.app/docs/hello-agents)
-- [MCP documentation](https://stratabook.app/docs/agent-mcp)
+- [Agent quick start](https://stratabook.org/docs/hello-agents)
+- [MCP documentation](https://stratabook.org/docs/agent-mcp)
 - [TypeScript SDK](https://github.com/alsk1992/strata-sdk-ts)
 - [Issues and feature requests](https://github.com/alsk1992/strata-mcp/issues)
 - [Security policy](SECURITY.md)

@@ -4,7 +4,7 @@
   "description": "Connect AI agents to Strata markets and Sonar quotes with MCP.",
   "type": "module",
   "license": "MIT OR Apache-2.0",
-  "homepage": "https://stratabook.app/docs/agent-mcp",
+  "homepage": "https://stratabook.org/docs/agent-mcp",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/alsk1992/strata-mcp.git"
