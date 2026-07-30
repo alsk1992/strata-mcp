@@ -1,7 +1,7 @@
 {
   "name": "@stratabook/mcp",
   "version": "0.1.0",
-  "description": "Official read-only MCP server for Strata and Sonar.",
+  "description": "Connect AI agents to Strata markets and Sonar quotes with MCP.",
   "type": "module",
   "license": "MIT OR Apache-2.0",
   "homepage": "https://stratabook.app/docs/agent-mcp",

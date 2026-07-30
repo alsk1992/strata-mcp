@@ -58,8 +58,8 @@ export async function createStrataMcpServer(
     },
     {
       instructions:
-        "Read-only access to Strata markets and short-lived Sonar quotes. "
-        + "All token values are atomic decimal strings. Never infer execution composition.",
+        "Use Strata to discover available markets and request short-lived Sonar quotes. "
+        + "Token values use exact atomic decimal strings. Check quote expiry and minimum output.",
     },
   );
 
@@ -68,7 +68,7 @@ export async function createStrataMcpServer(
     {
       title: "Strata capabilities",
       description:
-        "Discover the current versioned public Strata capability policy and MCP exposure.",
+        "See which Strata features are currently available to MCP clients.",
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -76,7 +76,7 @@ export async function createStrataMcpServer(
         openWorldHint: true,
       },
     },
-    async () => toolResult(await client.capabilities(), "Current Strata capability policy."),
+    async () => toolResult(await client.capabilities(), "Current Strata capabilities."),
   );
 
   const markets = server.registerTool(
@@ -84,8 +84,7 @@ export async function createStrataMcpServer(
     {
       title: "Strata markets",
       description:
-        "List Strata markets currently available to public agents. "
-        + "Implementation and liquidity composition remain private.",
+        "List Strata markets and their current Sonar quote availability.",
       inputSchema: {
         includePaused: z
           .boolean()
@@ -118,8 +117,8 @@ export async function createStrataMcpServer(
     {
       title: "Sonar quote",
       description:
-        "Request one short-lived, read-only Sonar quote over all eligible liquidity "
-        + "for a Strata market. This does not reserve, prepare, sign, or submit a trade.",
+        "Request a short-lived Sonar quote for a Strata market. Returns expected "
+        + "output, minimum output, fees, price impact, and expiry.",
       inputSchema: {
         market: z
           .string()
