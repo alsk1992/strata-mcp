@@ -1,48 +1,131 @@
-# Strata MCP
+<p align="center">
+  <img src="./assets/readme-hero.svg" alt="Strata — One quote. The whole market." width="100%" />
+</p>
 
-Connect AI agents to live Strata markets and Sonar quotes.
+<h1 align="center">Strata MCP</h1>
 
-Strata MCP gives compatible assistants a simple way to discover available
-markets, check current availability, and request exact, short-lived quotes from
-Sonar—Strata's unified liquidity and matching system.
+<p align="center">
+  Put live Strata markets and Sonar pricing inside any MCP-compatible agent.
+</p>
 
-## Connect to Strata
+<p align="center">
+  <a href="https://stratabook.app/docs/agent-mcp">Documentation</a>
+  ·
+  <a href="https://github.com/alsk1992/strata-sdk-ts">TypeScript</a>
+  ·
+  <a href="https://github.com/alsk1992/strata-agent-skills">Agent Skills</a>
+  ·
+  <a href="https://stratabook.app">Strata</a>
+</p>
 
-Use Strata's hosted Streamable HTTP server:
+One hosted connection gives an agent current market availability and
+decision-ready quotes from Sonar—Strata's unified liquidity and matching
+system. No local daemon is required.
 
-```text
-https://api.stratabook.app/mcp
+## Connect
+
+Add Strata as a Streamable HTTP server:
+
+```json
+{
+  "mcpServers": {
+    "strata": {
+      "type": "streamable-http",
+      "url": "https://api.stratabook.app/mcp"
+    }
+  }
+}
 ```
 
-Add this URL as a remote MCP server in any client that supports Streamable HTTP.
-There is nothing to install or host.
+That is the complete hosted setup. Once connected, the client discovers the
+Strata tools currently available to it.
 
-### Try asking
+## See Strata answer from a terminal
 
-- “Which Strata markets are available right now?”
-- “Get a Sonar sell quote for 0.1 SOL in SOL/USDC.”
-- “Show me the expected output, fees, price impact, minimum output, and expiry.”
-
-## Available tools
-
-| Tool | What it does |
-| --- | --- |
-| `strata_capabilities` | Shows the Strata features currently available to agents |
-| `strata_markets` | Lists markets and their current Sonar quote availability |
-| `strata_quote` | Requests a Sonar quote for a market, side, amount, and slippage |
-
-The available tool set automatically reflects the features currently offered by
-Strata.
-
-## Run locally
-
-Run the server over stdio with Node.js 20+:
+Use the official MCP Inspector (Node.js 22.7.5+) to list the hosted tools:
 
 ```sh
-npx -y @stratabook/mcp
+npx -y @modelcontextprotocol/inspector --cli \
+  https://api.stratabook.app/mcp \
+  --transport http \
+  --method tools/list
 ```
 
-Example configuration for clients that launch local MCP servers:
+Call Strata directly:
+
+```sh
+npx -y @modelcontextprotocol/inspector --cli \
+  https://api.stratabook.app/mcp \
+  --transport http \
+  --method tools/call \
+  --tool-name strata_markets \
+  --tool-arg includePaused=false
+```
+
+Request a live Sonar quote through the same connection:
+
+```sh
+npx -y @modelcontextprotocol/inspector --cli \
+  https://api.stratabook.app/mcp \
+  --transport http \
+  --method tools/call \
+  --tool-name strata_quote \
+  --tool-arg market=SOL/USDC \
+  --tool-arg side=sell \
+  --tool-arg 'amountInAtoms="10000000"' \
+  --tool-arg slippageBps=50
+```
+
+The response is structured data, ready for terminals, scripts, and agents.
+
+## What lands in the agent
+
+| Tool | Result |
+| --- | --- |
+| `strata_capabilities` | The Strata features available in the current session |
+| `strata_markets` | Markets, token decimals, and current Sonar quote readiness |
+| `strata_quote` | Expected output, consumed input, fees, minimum output, price impact, and expiry |
+
+### A Sonar quote call
+
+```json
+{
+  "market": "SOL/USDC",
+  "side": "sell",
+  "amountInAtoms": "10000000",
+  "slippageBps": 50
+}
+```
+
+The result gives an agent the economics it needs to reason clearly:
+
+```json
+{
+  "provider": "Sonar",
+  "amount_in_consumed_atoms": "10000000",
+  "amount_out_atoms": "1990000",
+  "minimum_output_atoms": "1980050",
+  "output_fee_atoms": "995",
+  "reference_price": "199.1",
+  "price_impact_pct": "0.0005"
+}
+```
+
+The values above use the repository's versioned example fixture. Live quotes
+also include a unique quote ID and authoritative expiry.
+
+Sonar handles the market. Your agent works with one economic result.
+
+## Hosted or local
+
+| | Hosted Streamable HTTP | Local stdio |
+| --- | --- | --- |
+| Start with | `https://api.stratabook.app/mcp` | `npx -y @stratabook/mcp` |
+| Best for | Agents with remote MCP support | Desktop clients and local toolchains |
+| You operate | Nothing | The local Node.js process |
+| Strata market data | Live | Live |
+
+Local stdio configuration:
 
 ```json
 {
@@ -55,7 +138,9 @@ Example configuration for clients that launch local MCP servers:
 }
 ```
 
-To expose your own Streamable HTTP endpoint:
+Node.js 20+ is required for the local package.
+
+## Self-host Streamable HTTP
 
 ```sh
 npx -y @stratabook/mcp \
@@ -64,29 +149,25 @@ npx -y @stratabook/mcp \
   --port 8787
 ```
 
-The HTTP server binds to loopback by default. Add TLS, authentication, and rate
+The server binds to loopback by default. Add TLS, authentication, and rate
 limiting before making a self-hosted instance remotely accessible.
 
-## Working with Sonar quotes
+## Built for exact automation
 
-One Sonar request returns a unified result for the complete Strata market,
-including expected output, fees, price impact, minimum output, and expiry.
+- Token values stay as atomic-unit decimal strings.
+- Quote expiry and minimum output remain explicit fields.
+- The tool set follows what Strata currently makes available.
+- Errors include stable codes and retryability hints.
 
-Token values are exact atomic-unit strings. Agents should preserve those values,
-respect `minimum_output_atoms`, and request a new quote after expiry.
+`0.1.x` provides market discovery and read-only Sonar quotes. It cannot prepare,
+sign, or submit transactions and never asks for wallet or private-key material.
 
-## Available today
-
-The `0.1.x` release provides read-only market discovery and Sonar quotes. It
-cannot prepare, sign, or submit transactions and never asks for wallet,
-private-key, keypair, or session-key material.
-
-## Documentation and support
+## Resources
 
 - [Agent quick start](https://stratabook.app/docs/hello-agents)
 - [MCP documentation](https://stratabook.app/docs/agent-mcp)
 - [TypeScript SDK](https://github.com/alsk1992/strata-sdk-ts)
-- [Report a bug or request a feature](https://github.com/alsk1992/strata-mcp/issues)
-- [Report a security issue](SECURITY.md)
+- [Issues and feature requests](https://github.com/alsk1992/strata-mcp/issues)
+- [Security policy](SECURITY.md)
 
 Licensed under either [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT).
