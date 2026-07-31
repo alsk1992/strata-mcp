@@ -33,7 +33,7 @@ jobs:
         run: npm ci && npm run ci && mkdir ../packages && npm pack --pack-destination ../packages
       - name: Install MCP dependencies against SDK source
         working-directory: mcp
-        run: cp package.json package.publish.json; npm pkg delete dependencies.@stratabook/sdk; npm install --ignore-scripts --package-lock=false; cp package.publish.json package.json; npm install --no-save --package-lock=false ../packages/stratabook-sdk-0.1.1.tgz
+        run: cp package.json package.publish.json; npm pkg delete dependencies.@stratabook/sdk; npm install --ignore-scripts --package-lock=false; cp package.publish.json package.json; npm install --no-save --package-lock=false ../packages/stratabook-sdk-*.tgz
       - name: Verify MCP
         working-directory: mcp
         run: npm run ci
