@@ -10,6 +10,7 @@ import type {
   QuoteResponse,
   StrataClient,
 } from "@stratabook/sdk";
+import { CONTRACT_VERSION } from "@stratabook/sdk";
 import { capabilityAvailable, createStrataMcpServer } from "../src/server.js";
 import { SERVER_VERSION } from "../src/version.js";
 
@@ -26,7 +27,7 @@ function catalog(
 ): CapabilityCatalog {
   return {
     schema_version: 1,
-    contract_version: "1.1",
+    contract_version: CONTRACT_VERSION,
     capabilities: [
       {
         id: "quotes.read",
@@ -63,7 +64,7 @@ test("write-risk capabilities cannot become MCP tools", () => {
 test("protocol tool discovery and calls obey the current public policy", async () => {
   let liveCatalog: CapabilityCatalog = {
     schema_version: 1,
-    contract_version: "1.1",
+    contract_version: CONTRACT_VERSION,
     capabilities: [
       {
         id: "markets.read",
@@ -89,7 +90,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
   };
   const markets: MarketsResponse = {
     schema_version: 1,
-    contract_version: "1.1",
+    contract_version: CONTRACT_VERSION,
     markets: [
       {
         base: "So11111111111111111111111111111111111111112",
@@ -105,7 +106,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
   };
   const quote: QuoteResponse = {
     schema_version: 1,
-    contract_version: "1.1",
+    contract_version: CONTRACT_VERSION,
     quote_id: "opaque-test-quote",
     server_time_ms: 1_785_420_000_000,
     expires_at_ms: 1_785_420_005_000,
