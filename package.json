@@ -1,6 +1,6 @@
 {
   "name": "@stratabook/mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Connect AI agents to Strata markets and Sonar quotes with MCP.",
   "type": "module",
   "license": "MIT OR Apache-2.0",

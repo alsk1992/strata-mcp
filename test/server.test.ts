@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -10,6 +11,14 @@ import type {
   StrataClient,
 } from "@stratabook/sdk";
 import { capabilityAvailable, createStrataMcpServer } from "../src/server.js";
+import { SERVER_VERSION } from "../src/version.js";
+
+const require = createRequire(import.meta.url);
+const packageMetadata = require("../../package.json") as { version: string };
+
+test("server identity follows package metadata", () => {
+  assert.equal(SERVER_VERSION, packageMetadata.version);
+});
 
 function catalog(
   enabled: boolean,

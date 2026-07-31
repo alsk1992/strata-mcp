@@ -10,6 +10,7 @@ import {
   type QuoteResponse,
 } from "@stratabook/sdk";
 import * as z from "zod/v4";
+import { SERVER_VERSION } from "./version.js";
 
 export interface StrataMcpOptions {
   apiBase?: string;
@@ -23,7 +24,6 @@ export interface StrataMcpRuntime {
   close(): Promise<void>;
 }
 
-const SERVER_VERSION = "0.1.1";
 const REFRESH_INTERVAL_MS = 5_000;
 
 type ToolHandles = {

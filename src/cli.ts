@@ -6,6 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { DEFAULT_API_BASE } from "@stratabook/sdk";
 import { createStrataMcpServer } from "./server.js";
+import { SERVER_VERSION } from "./version.js";
 
 interface Options {
   transport: "stdio" | "http";
@@ -45,7 +46,7 @@ function parse(argv: string[]): Options {
     1,
     65_535,
   );
-  const host = values.get("host") ?? process.env.STRATA_MCP_HOST ?? "127.0.0.1";
+  const host = values.get("host") ?? process.env.STRATA_MCP_HOST ?? "localhost";
   if (!/^[a-zA-Z0-9.:[\]-]+$/.test(host)) throw new Error("host is invalid");
   return {
     transport,
@@ -69,13 +70,13 @@ function help(): void {
 
 Usage:
   strata-mcp
-  strata-mcp --transport http [--host 127.0.0.1] [--port 8787]
+  strata-mcp --transport http [--host localhost] [--port 8787]
 
 Options:
   --transport stdio|http   Local stdio by default; Streamable HTTP for hosting
   --api-base URL           Strata public API (default: ${DEFAULT_API_BASE})
   --timeout-ms N           Upstream timeout, 250..60000 (default: 10000)
-  --host HOST              HTTP bind host (default: 127.0.0.1)
+  --host HOST              HTTP bind host (default: localhost)
   --port N                 HTTP port (default: 8787)
 
 This server is read-only. It accepts no wallet, private key, or session key.
@@ -104,7 +105,7 @@ async function runHttp(options: Options): Promise<void> {
     response
       .status(200)
       .set("Cache-Control", "no-store")
-      .json({ ok: true, service: "strata-mcp", version: "0.1.0" });
+      .json({ ok: true, service: "strata-mcp", version: SERVER_VERSION });
   });
 
   app.post("/mcp", async (request: Request, response: Response) => {
