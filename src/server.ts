@@ -1,6 +1,7 @@
 import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  DEFAULT_SLIPPAGE_BPS,
   StrataApiError,
   StrataClient,
   type CapabilityCatalog,
@@ -22,7 +23,7 @@ export interface StrataMcpRuntime {
   close(): Promise<void>;
 }
 
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = "0.1.1";
 const REFRESH_INTERVAL_MS = 5_000;
 
 type ToolHandles = {
@@ -137,8 +138,11 @@ export async function createStrataMcpServer(
           .min(0)
           .max(1_000)
           .optional()
-          .default(50)
-          .describe("Maximum slippage in basis points."),
+          .default(DEFAULT_SLIPPAGE_BPS)
+          .describe(
+            "Optional maximum execution tolerance in basis points. "
+            + "The default 0 requires exact quoted output.",
+          ),
       },
       annotations: {
         readOnlyHint: true,
