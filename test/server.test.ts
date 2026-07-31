@@ -5,6 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type {
   CapabilityCatalog,
   MarketsResponse,
+  QuoteRequest,
   QuoteResponse,
   StrataClient,
 } from "@stratabook/sdk";
@@ -111,10 +112,14 @@ test("protocol tool discovery and calls obey the current public policy", async (
     price_impact_pct: "0.01",
     provider: "Sonar",
   };
+  let quoteRequest: QuoteRequest | undefined;
   const fakeClient = {
     capabilities: async () => liveCatalog,
     markets: async () => markets,
-    quote: async () => quote,
+    quote: async (request: QuoteRequest) => {
+      quoteRequest = request;
+      return quote;
+    },
   } as unknown as StrataClient;
   const runtime = await createStrataMcpServer({ client: fakeClient });
   const protocolClient = new Client({ name: "strata-mcp-test", version: "1.0.0" });
@@ -135,6 +140,17 @@ test("protocol tool discovery and calls obey the current public policy", async (
     });
     assert.equal(result.isError, undefined);
     assert.deepEqual(result.structuredContent, markets);
+
+    const quoteResult = await protocolClient.callTool({
+      name: "strata_quote",
+      arguments: {
+        market: "SOL/USDC",
+        side: "sell",
+        amountInAtoms: "10000000",
+      },
+    });
+    assert.equal(quoteResult.isError, undefined);
+    assert.equal(quoteRequest?.slippageBps, 0);
 
     liveCatalog = {
       ...liveCatalog,

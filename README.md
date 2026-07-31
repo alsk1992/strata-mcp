@@ -72,8 +72,7 @@ npx -y @modelcontextprotocol/inspector --cli \
   --tool-name strata_quote \
   --tool-arg market=SOL/USDC \
   --tool-arg side=sell \
-  --tool-arg 'amountInAtoms="10000000"' \
-  --tool-arg slippageBps=50
+  --tool-arg 'amountInAtoms="10000000"'
 ```
 
 The response is structured data, ready for terminals, scripts, and agents.
@@ -92,8 +91,7 @@ The response is structured data, ready for terminals, scripts, and agents.
 {
   "market": "SOL/USDC",
   "side": "sell",
-  "amountInAtoms": "10000000",
-  "slippageBps": 50
+  "amountInAtoms": "10000000"
 }
 ```
 
@@ -104,7 +102,7 @@ The result gives an agent the economics it needs to reason clearly:
   "provider": "Sonar",
   "amount_in_consumed_atoms": "10000000",
   "amount_out_atoms": "1990000",
-  "minimum_output_atoms": "1980050",
+  "minimum_output_atoms": "1990000",
   "output_fee_atoms": "995",
   "reference_price": "199.1",
   "price_impact_pct": "0.0005"
@@ -115,6 +113,13 @@ The values above use the repository's versioned example fixture. Live quotes
 also include a unique quote ID and authoritative expiry.
 
 Sonar handles the market. Your agent works with one economic result.
+
+### Execution tolerance
+
+Quotes default to exact output: `minimum_output_atoms` equals
+`amount_out_atoms`. An agent may explicitly provide `slippageBps` when its task
+accepts a lower minimum output. This is an execution safeguard, not an estimate
+of market depth; `price_impact_pct` reports price impact separately.
 
 ## Hosted or local
 
