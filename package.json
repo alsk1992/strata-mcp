@@ -27,7 +27,7 @@
     }
   },
   "bin": {
-    "strata-mcp": "./dist/src/cli.js"
+    "strata-mcp": "dist/src/cli.js"
   },
   "files": [
     "dist/src",
