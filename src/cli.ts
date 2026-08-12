@@ -5,7 +5,10 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { DEFAULT_API_BASE } from "@stratabook/sdk";
-import { STRATA_AGENT_HARNESS } from "./generated-harness.js";
+import {
+  STRATA_ACTION_GRAPH,
+  STRATA_AGENT_HARNESS,
+} from "./generated-harness.js";
 import { createStrataMcpServer, probeStrataMcpReadiness } from "./server.js";
 import { SERVER_VERSION } from "./version.js";
 
@@ -80,7 +83,9 @@ Options:
   --host HOST              HTTP bind host (default: localhost)
   --port N                 HTTP port (default: 8787)
 
-This server is read-only. It accepts no wallet, private key, or session key.
+This server exposes capability-gated quote and execution operations. The external
+agent owner controls permission and signing. Strata accepts public keys,
+signatures, and signed transactions, never private keys or seed phrases.
 `);
 }
 
@@ -122,6 +127,13 @@ async function runHttp(options: Options): Promise<void> {
       .status(200)
       .set("Cache-Control", "public, max-age=300")
       .json(STRATA_AGENT_HARNESS);
+  });
+
+  app.get("/.well-known/strata-action-graph.json", (_request: Request, response: Response) => {
+    response
+      .status(200)
+      .set("Cache-Control", "public, max-age=300")
+      .json(STRATA_ACTION_GRAPH);
   });
 
   app.post("/mcp", async (request: Request, response: Response) => {
