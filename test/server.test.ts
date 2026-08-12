@@ -11,7 +11,16 @@ import type {
   StrataClient,
 } from "@stratabook/sdk";
 import { CONTRACT_VERSION } from "@stratabook/sdk";
-import { capabilityAvailable, createStrataMcpServer } from "../src/server.js";
+import {
+  STRATA_AGENT_HARNESS,
+  STRATA_AGENT_HARNESS_INSTRUCTIONS,
+  STRATA_AGENT_HARNESS_URI,
+} from "../src/generated-harness.js";
+import {
+  capabilityAvailable,
+  createStrataMcpServer,
+  probeStrataMcpReadiness,
+} from "../src/server.js";
 import { SERVER_VERSION } from "../src/version.js";
 
 const require = createRequire(import.meta.url);
@@ -59,6 +68,37 @@ test("write-risk capabilities cannot become MCP tools", () => {
     mcp_exposure: "submit",
   };
   assert.equal(capabilityAvailable(value, "trade.submit"), false);
+});
+
+test("readiness validates the live contract instead of reporting a shallow liveness check", async () => {
+  const readyClient = {
+    capabilities: async () => catalog(true),
+  } as unknown as StrataClient;
+  assert.deepEqual(await probeStrataMcpReadiness({ client: readyClient }), {
+    ok: true,
+    service: "strata-mcp",
+    version: SERVER_VERSION,
+    contract_version: CONTRACT_VERSION,
+    harness_version: STRATA_AGENT_HARNESS.harness_version,
+  });
+
+  const staleClient = {
+    capabilities: async () => ({ ...catalog(true), contract_version: "1.0" }),
+  } as unknown as StrataClient;
+  await assert.rejects(
+    probeStrataMcpReadiness({ client: staleClient }),
+    /harness and live contract versions differ/,
+  );
+  await assert.rejects(
+    createStrataMcpServer({ client: staleClient }),
+    /harness and live contract versions differ/,
+  );
+});
+
+test("initialization instructions contain the mandatory first-run safety gates", () => {
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /Start every objective with strata_capabilities/);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /exact input atoms/);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /Never request wallet secrets/);
 });
 
 test("protocol tool discovery and calls obey the current public policy", async () => {
@@ -138,6 +178,28 @@ test("protocol tool discovery and calls obey the current public policy", async (
   try {
     await runtime.server.connect(serverTransport);
     await protocolClient.connect(clientTransport);
+
+    const resources = await protocolClient.listResources();
+    assert.deepEqual(
+      resources.resources.map((resource) => resource.uri),
+      [STRATA_AGENT_HARNESS_URI],
+    );
+    const harness = await protocolClient.readResource({ uri: STRATA_AGENT_HARNESS_URI });
+    assert.equal(harness.contents.length, 1);
+    assert.deepEqual(
+      JSON.parse("text" in harness.contents[0]! ? harness.contents[0]!.text : "{}"),
+      STRATA_AGENT_HARNESS,
+    );
+
+    const prompts = await protocolClient.listPrompts();
+    assert.deepEqual(prompts.prompts.map((prompt) => prompt.name), ["strata_start"]);
+    const start = await protocolClient.getPrompt({
+      name: "strata_start",
+      arguments: { objective: "Quote selling 0.1 SOL for USDC." },
+    });
+    assert.match(JSON.stringify(start.messages), /strata_capabilities/);
+    assert.match(JSON.stringify(start.messages), /Quote selling 0.1 SOL/);
+
     const initial = await protocolClient.listTools();
     assert.deepEqual(
       initial.tools.map((tool) => tool.name).sort(),

@@ -5,7 +5,8 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { DEFAULT_API_BASE } from "@stratabook/sdk";
-import { createStrataMcpServer } from "./server.js";
+import { STRATA_AGENT_HARNESS } from "./generated-harness.js";
+import { createStrataMcpServer, probeStrataMcpReadiness } from "./server.js";
 import { SERVER_VERSION } from "./version.js";
 
 interface Options {
@@ -101,11 +102,26 @@ async function runHttp(options: Options): Promise<void> {
   const app = createMcpExpressApp({ host: options.host });
   app.disable("x-powered-by");
 
-  app.get("/health", (_request: Request, response: Response) => {
+  app.get("/health", async (_request: Request, response: Response) => {
+    try {
+      const readiness = await probeStrataMcpReadiness(options);
+      response.status(200).set("Cache-Control", "no-store").json(readiness);
+    } catch (error) {
+      process.stderr.write(`[strata-mcp] readiness failed: ${safeError(error)}\n`);
+      response.status(503).set("Cache-Control", "no-store").json({
+        ok: false,
+        service: "strata-mcp",
+        version: SERVER_VERSION,
+        readiness: "failed",
+      });
+    }
+  });
+
+  app.get("/.well-known/strata-agent.json", (_request: Request, response: Response) => {
     response
       .status(200)
-      .set("Cache-Control", "no-store")
-      .json({ ok: true, service: "strata-mcp", version: SERVER_VERSION });
+      .set("Cache-Control", "public, max-age=300")
+      .json(STRATA_AGENT_HARNESS);
   });
 
   app.post("/mcp", async (request: Request, response: Response) => {
@@ -123,7 +139,8 @@ async function runHttp(options: Options): Promise<void> {
       });
       await runtime.server.connect(transport);
       await transport.handleRequest(request, response, request.body);
-    } catch {
+    } catch (error) {
+      process.stderr.write(`[strata-mcp] request failed: ${safeError(error)}\n`);
       if (!response.headersSent) {
         response.status(500).json({
           jsonrpc: "2.0",
@@ -154,6 +171,11 @@ async function runHttp(options: Options): Promise<void> {
   };
   process.once("SIGINT", close);
   process.once("SIGTERM", close);
+}
+
+function safeError(error: unknown): string {
+  if (!(error instanceof Error)) return "unknown_error";
+  return `${error.name}: ${error.message}`.replace(/[\r\n\t]/g, " ").slice(0, 300);
 }
 
 async function main(): Promise<void> {
