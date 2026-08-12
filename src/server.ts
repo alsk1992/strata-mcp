@@ -10,6 +10,11 @@ import {
   type QuoteResponse,
 } from "@stratabook/sdk";
 import * as z from "zod/v4";
+import {
+  STRATA_AGENT_HARNESS,
+  STRATA_AGENT_HARNESS_INSTRUCTIONS,
+  STRATA_AGENT_HARNESS_URI,
+} from "./generated-harness.js";
 import { SERVER_VERSION } from "./version.js";
 
 export interface StrataMcpOptions {
@@ -22,6 +27,14 @@ export interface StrataMcpRuntime {
   server: McpServer;
   refreshCapabilities(): Promise<void>;
   close(): Promise<void>;
+}
+
+export interface StrataMcpReadiness {
+  ok: true;
+  service: "strata-mcp";
+  version: string;
+  contract_version: string;
+  harness_version: string;
 }
 
 const REFRESH_INTERVAL_MS = 5_000;
@@ -42,26 +55,92 @@ export function capabilityAvailable(catalog: CapabilityCatalog, id: string): boo
   );
 }
 
-export async function createStrataMcpServer(
-  options: StrataMcpOptions = {},
-): Promise<StrataMcpRuntime> {
-  const client =
-    options.client
+function strataClient(options: StrataMcpOptions): StrataClient {
+  return options.client
     ?? new StrataClient({
       apiBase: options.apiBase,
       timeoutMs: options.timeoutMs,
     });
+}
+
+export async function probeStrataMcpReadiness(
+  options: StrataMcpOptions = {},
+): Promise<StrataMcpReadiness> {
+  const catalog = await strataClient(options).capabilities();
+  if (catalog.contract_version !== STRATA_AGENT_HARNESS.contract_version) {
+    throw new Error("agent harness and live contract versions differ");
+  }
+  return {
+    ok: true,
+    service: "strata-mcp",
+    version: SERVER_VERSION,
+    contract_version: catalog.contract_version,
+    harness_version: STRATA_AGENT_HARNESS.harness_version,
+  };
+}
+
+export async function createStrataMcpServer(
+  options: StrataMcpOptions = {},
+): Promise<StrataMcpRuntime> {
+  const client = strataClient(options);
   const initialCatalog = await client.capabilities();
+  if (initialCatalog.contract_version !== STRATA_AGENT_HARNESS.contract_version) {
+    throw new Error("agent harness and live contract versions differ");
+  }
   const server = new McpServer(
     {
       name: "strata",
       version: SERVER_VERSION,
     },
     {
-      instructions:
-        "Use Strata to discover available markets and request short-lived Sonar quotes. "
-        + "Token values use exact atomic decimal strings. Check quote expiry and minimum output.",
+      instructions: STRATA_AGENT_HARNESS_INSTRUCTIONS,
     },
+  );
+
+  server.registerResource(
+    "strata_agent_harness",
+    STRATA_AGENT_HARNESS_URI,
+    {
+      title: "Strata Agent Harness",
+      description: "Canonical capability-gated first-run workflow for Strata agents.",
+      mimeType: "application/json",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: STRATA_AGENT_HARNESS_URI,
+          mimeType: "application/json",
+          text: JSON.stringify(STRATA_AGENT_HARNESS),
+        },
+      ],
+    }),
+  );
+
+  server.registerPrompt(
+    "strata_start",
+    {
+      title: "Start a Strata objective",
+      description: "Apply the Strata Agent Harness to a concrete read-only objective.",
+      argsSchema: {
+        objective: z
+          .string()
+          .min(1)
+          .max(2_000)
+          .describe("The user's concrete Strata market or quote objective."),
+      },
+    },
+    async ({ objective }) => ({
+      description: "Capability-gated Strata objective",
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `${STRATA_AGENT_HARNESS_INSTRUCTIONS}\n\nObjective: ${objective.trim()}`,
+          },
+        },
+      ],
+    }),
   );
 
   server.registerTool(
