@@ -5,6 +5,9 @@ import {
   StrataApiError,
   StrataClient,
   type CapabilityCatalog,
+  type ExecutionChallengeRequest,
+  type ExecutionPrepareRequest,
+  type ExecutionSubmitRequest,
   type MarketsResponse,
   type QuoteRequest,
   type QuoteResponse,
@@ -14,6 +17,7 @@ import {
   STRATA_AGENT_HARNESS,
   STRATA_AGENT_HARNESS_INSTRUCTIONS,
   STRATA_AGENT_HARNESS_URI,
+  STRATA_ACTION_GRAPH_URI,
 } from "./generated-harness.js";
 import { SERVER_VERSION } from "./version.js";
 
@@ -42,6 +46,9 @@ const REFRESH_INTERVAL_MS = 5_000;
 type ToolHandles = {
   markets: RegisteredTool;
   quote: RegisteredTool;
+  executionChallenge: RegisteredTool;
+  executionPrepare: RegisteredTool;
+  executionSubmit: RegisteredTool;
 };
 
 export function capabilityAvailable(catalog: CapabilityCatalog, id: string): boolean {
@@ -50,8 +57,8 @@ export function capabilityAvailable(catalog: CapabilityCatalog, id: string): boo
       capability.id === id
       && capability.default_enabled
       && capability.public_sdk
-      && capability.risk === "read"
-      && capability.mcp_exposure === "read",
+      && capability.mcp_exposure !== "none"
+      && capability.risk === capability.mcp_exposure,
   );
 }
 
@@ -116,11 +123,31 @@ export async function createStrataMcpServer(
     }),
   );
 
+  server.registerResource(
+    "strata_action_graph",
+    STRATA_ACTION_GRAPH_URI,
+    {
+      title: "Strata Action Graph",
+      description:
+        "Live executable topology for discovery, quoting, external signing, and submission.",
+      mimeType: "application/json",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: STRATA_ACTION_GRAPH_URI,
+          mimeType: "application/json",
+          text: JSON.stringify(await client.actionGraph()),
+        },
+      ],
+    }),
+  );
+
   server.registerPrompt(
     "strata_start",
     {
       title: "Start a Strata objective",
-      description: "Apply the Strata Agent Harness to a concrete read-only objective.",
+      description: "Apply the Strata Agent Harness to a concrete objective.",
       argsSchema: {
         objective: z
           .string()
@@ -157,6 +184,22 @@ export async function createStrataMcpServer(
       },
     },
     async () => toolResult(await client.capabilities(), "Current Strata capabilities."),
+  );
+
+  server.registerTool(
+    "strata_action_graph",
+    {
+      title: "Strata action graph",
+      description:
+        "Discover live operations, required capabilities, transition conditions, and external signing boundaries.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => toolResult(await client.actionGraph(), "Current Strata action graph."),
   );
 
   const markets = server.registerTool(
@@ -248,7 +291,147 @@ export async function createStrataMcpServer(
       }),
   );
 
-  const handles: ToolHandles = { markets, quote };
+  const executionChallenge = server.registerTool(
+    "strata_execution_challenge",
+    {
+      title: "Strata execution challenge",
+      description:
+        "Request canonical quote-bound authorization bytes for the external signer configured by the agent owner.",
+      inputSchema: {
+        market: z.string().min(1).max(128).describe("Market label or public market ID."),
+        quoteId: z.string().regex(/^sq_[0-9a-f]{32}$/).describe("Unexpired Sonar quote ID."),
+        ownerWallet: z.string().min(32).max(44).describe("Base58 owner wallet public key."),
+        sessionPublicKey: z
+          .string()
+          .min(32)
+          .max(44)
+          .describe("Base58 public key for the externally configured signer."),
+        accountSequence: z
+          .string()
+          .regex(/^[0-9]+$/)
+          .max(20)
+          .describe("Current Vault account sequence as an unsigned decimal string."),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ market, quoteId, ownerWallet, sessionPublicKey, accountSequence }) =>
+      guardedTool(client, "trade.prepare", async () => {
+        const request: ExecutionChallengeRequest = {
+          market,
+          quoteId,
+          ownerWallet,
+          sessionPublicKey,
+          accountSequence,
+        };
+        const response = await client.executionChallenge(request);
+        return toolResult(
+          response,
+          `Authorization challenge ${response.challenge_id}; expires at ${response.expires_at_ms}.`,
+        );
+      }),
+  );
+
+  const executionPrepare = server.registerTool(
+    "strata_execution_prepare",
+    {
+      title: "Prepare Strata execution",
+      description:
+        "Exchange an externally signed authorization challenge for a quote-bound partially signed transaction.",
+      inputSchema: {
+        market: z.string().min(1).max(128).describe("Market label or public market ID."),
+        challengeId: z
+          .string()
+          .regex(/^sc_[0-9a-f]{32}$/)
+          .describe("Execution challenge ID returned by Strata."),
+        authorizationSignature: z
+          .string()
+          .min(1)
+          .max(128)
+          .regex(/^[1-9A-HJ-NP-Za-km-z]+$/)
+          .describe("Base58 Ed25519 signature made externally over the challenge payload."),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ market, challengeId, authorizationSignature }) =>
+      guardedTool(client, "trade.prepare", async () => {
+        const request: ExecutionPrepareRequest = {
+          market,
+          challengeId,
+          authorizationSignature,
+        };
+        const response = await client.executionPrepare(request);
+        return toolResult(
+          response,
+          `Prepared execution ${response.execution_id}; externally verify and sign before ${response.expires_at_ms}.`,
+        );
+      }),
+  );
+
+  const executionSubmit = server.registerTool(
+    "strata_execution_submit",
+    {
+      title: "Submit Strata execution",
+      description:
+        "Submit an externally signed prepared transaction with an idempotency key.",
+      inputSchema: {
+        market: z.string().min(1).max(128).describe("Market label or public market ID."),
+        executionId: z
+          .string()
+          .regex(/^se_[0-9a-f]{32}$/)
+          .describe("Prepared execution ID returned by Strata."),
+        signedTransactionBase64: z
+          .string()
+          .min(4)
+          .max(8_192)
+          .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/)
+          .describe("The externally signed Solana transaction in canonical base64."),
+        idempotencyKey: z
+          .string()
+          .min(1)
+          .max(64)
+          .regex(/^[A-Za-z0-9._-]+$/)
+          .describe("Stable retry key for exactly this execution."),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ market, executionId, signedTransactionBase64, idempotencyKey }) =>
+      guardedTool(client, "trade.submit", async () => {
+        const request: ExecutionSubmitRequest = {
+          market,
+          executionId,
+          signedTransactionBase64,
+          idempotencyKey,
+        };
+        const response = await client.executionSubmit(request);
+        return toolResult(
+          response,
+          `Submitted execution ${response.execution_id} as ${response.signature}.`,
+        );
+      }),
+  );
+
+  const handles: ToolHandles = {
+    markets,
+    quote,
+    executionChallenge,
+    executionPrepare,
+    executionSubmit,
+  };
   applyCapabilityCatalog(handles, initialCatalog);
   let closed = false;
   const refresh = async () => {
@@ -276,6 +459,9 @@ export async function createStrataMcpServer(
 function applyCapabilityCatalog(handles: ToolHandles, catalog: CapabilityCatalog): void {
   setToolEnabled(handles.markets, capabilityAvailable(catalog, "markets.read"));
   setToolEnabled(handles.quote, capabilityAvailable(catalog, "quotes.read"));
+  setToolEnabled(handles.executionChallenge, capabilityAvailable(catalog, "trade.prepare"));
+  setToolEnabled(handles.executionPrepare, capabilityAvailable(catalog, "trade.prepare"));
+  setToolEnabled(handles.executionSubmit, capabilityAvailable(catalog, "trade.submit"));
 }
 
 function setToolEnabled(tool: RegisteredTool, enabled: boolean): void {

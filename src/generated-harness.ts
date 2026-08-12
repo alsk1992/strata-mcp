@@ -5,22 +5,28 @@ export const STRATA_AGENT_HARNESS = {
   "harness_version": "1.0",
   "contract_version": "1.1",
   "name": "Strata Agent Harness",
-  "summary": "A capability-gated workflow for agents that explore Strata markets and request validated Sonar quotes.",
+  "summary": "A capability-gated workflow and executable action graph for agents that discover, quote, prepare, externally sign, and submit Strata operations.",
   "entrypoints": {
     "documentation": "https://stratabook.org/docs/agent-harness/",
     "capabilities": "https://api.stratabook.app/sonar/capabilities",
     "markets": "https://api.stratabook.app/sonar/markets",
+    "action_graph": "https://api.stratabook.app/sonar/action-graph",
     "mcp": "https://api.stratabook.app/mcp",
     "manifest": "https://api.stratabook.app/.well-known/strata-agent.json"
   },
   "interfaces": {
     "mcp_tool_order": [
       "strata_capabilities",
+      "strata_action_graph",
       "strata_markets",
-      "strata_quote"
+      "strata_quote",
+      "strata_execution_challenge",
+      "strata_execution_prepare",
+      "strata_execution_submit"
     ],
     "terminal": [
       "npx -y @stratabook/sdk capabilities --json",
+      "npx -y @stratabook/sdk action-graph --json",
       "npx -y @stratabook/sdk markets --json",
       "npx -y @stratabook/sdk quote --market SOL/USDC --side sell --amount-atoms 10000000 --json"
     ]
@@ -32,7 +38,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "establish_mode",
-      "instruction": "State whether the available session is read-only or exposes a separately authorized prepare or submit capability. Read access never implies permission to move funds."
+      "instruction": "Read the action graph and identify which prepare and submit nodes are live. The external agent owner configures its permissions and signer authority; static documentation never enables a Strata operation."
     },
     {
       "id": "understand_objective",
@@ -48,7 +54,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "request_quote",
-      "instruction": "Request a fresh Sonar quote with an explicit side, exact input atoms, and user-approved execution tolerance."
+      "instruction": "Request a fresh Sonar quote with an explicit side, exact input atoms, and execution tolerance supplied by the external agent."
     },
     {
       "id": "validate_quote",
@@ -60,7 +66,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "authorize_writes",
-      "instruction": "If write capabilities are ever exposed, keep prepare and submit separate, require the configured approval, verify immutable economics, and use idempotency."
+      "instruction": "When prepare and submit are exposed, keep signing external to Strata: request canonical authorization bytes, sign them with the owner-configured signer, verify the prepared transaction preserves the quote, then submit the externally signed transaction with idempotency."
     },
     {
       "id": "monitor_outcome",
@@ -70,7 +76,7 @@ export const STRATA_AGENT_HARNESS = {
   "stop_conditions": [
     "The required live capability is disabled or absent.",
     "The market is paused, unavailable, or has no reviewed operation path.",
-    "Market, side, amount, decimals, tolerance, or approval is ambiguous.",
+    "Market, side, amount, decimals, tolerance, or signer authority is unavailable or ambiguous.",
     "The contract version is unsupported or a response contains unknown fields.",
     "A quote is expired or its market, side, amount, fee, minimum-output, or time binding is inconsistent.",
     "A requested operation exceeds the exposed tool, account, or policy scope.",
@@ -81,10 +87,188 @@ export const STRATA_AGENT_HARNESS = {
     "Never call undocumented endpoints or reconstruct private Sonar behavior.",
     "Never silently widen slippage, refresh changed economics, substitute a market, or retry a non-retryable failure.",
     "Treat capability removal, revocation, expiry, and emergency disable as immediate stop signals.",
-    "The current MCP and terminal tools are read-only unless the live catalog and callable tool list explicitly prove otherwise."
+    "Capability and action-graph availability are authoritative for Strata operations; permission and signer policy remain controlled by the external agent owner."
   ]
 } as const;
 
 export const STRATA_AGENT_HARNESS_URI = "strata://agent-harness/v1";
 
-export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_markets. Read strata://agent-harness/v1 for the complete workflow. Resolve the market, side, exact input atoms, and tolerance before strata_quote. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. Stop on ambiguity, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing approval. Never request wallet secrets, private keys, seed phrases, session keys, or production credentials. Current MCP tools are read-only unless the live catalog and callable tool list explicitly prove otherwise.";
+export const STRATA_ACTION_GRAPH = {
+  "schema_version": 1,
+  "graph_version": "1.0",
+  "contract_version": "1.1",
+  "entry_node": "discover_capabilities",
+  "authority": {
+    "permission_source": "external_agent_owner",
+    "signing_location": "external",
+    "accepts_private_keys": false
+  },
+  "nodes": [
+    {
+      "id": "discover_capabilities",
+      "kind": "discovery",
+      "summary": "Read the live capabilities that currently expose Strata operations.",
+      "required_capabilities": [],
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/sonar/capabilities",
+        "mcp_tool": "strata_capabilities"
+      }
+    },
+    {
+      "id": "discover_markets",
+      "kind": "discovery",
+      "summary": "Discover ready markets, token decimals, and public operation paths.",
+      "required_capabilities": [
+        "markets.read"
+      ],
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/sonar/markets",
+        "mcp_tool": "strata_markets"
+      }
+    },
+    {
+      "id": "discover_action_graph",
+      "kind": "discovery",
+      "summary": "Read the executable topology, live node availability, external signing steps, and transition conditions.",
+      "required_capabilities": [],
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/sonar/action-graph",
+        "mcp_tool": "strata_action_graph"
+      }
+    },
+    {
+      "id": "request_quote",
+      "kind": "read",
+      "summary": "Request economics bound to a market, side, exact input atoms, and tolerance.",
+      "required_capabilities": [
+        "quotes.read"
+      ],
+      "available": true,
+      "operation": {
+        "method": "POST",
+        "path": "/sonar/markets/{market}/quote",
+        "mcp_tool": "strata_quote"
+      }
+    },
+    {
+      "id": "request_execution_challenge",
+      "kind": "prepare",
+      "summary": "Request canonical authorization bytes for an unexpired quote and external signer.",
+      "required_capabilities": [
+        "trade.prepare"
+      ],
+      "available": true,
+      "operation": {
+        "method": "POST",
+        "path": "/sonar/markets/{market}/execution/challenge",
+        "mcp_tool": "strata_execution_challenge"
+      }
+    },
+    {
+      "id": "sign_authorization",
+      "kind": "external_signature",
+      "summary": "The agent owner's configured signer signs the returned authorization bytes externally.",
+      "required_capabilities": [],
+      "available": true
+    },
+    {
+      "id": "prepare_execution",
+      "kind": "prepare",
+      "summary": "Exchange the authorization signature for a quote-bound partially signed transaction.",
+      "required_capabilities": [
+        "trade.prepare"
+      ],
+      "available": true,
+      "operation": {
+        "method": "POST",
+        "path": "/sonar/markets/{market}/execution/prepare",
+        "mcp_tool": "strata_execution_prepare"
+      }
+    },
+    {
+      "id": "sign_transaction",
+      "kind": "external_signature",
+      "summary": "The external signer verifies and fills its signature slot without sending key material to Strata.",
+      "required_capabilities": [],
+      "available": true
+    },
+    {
+      "id": "submit_execution",
+      "kind": "submit",
+      "summary": "Submit the signed transaction with an idempotency key.",
+      "required_capabilities": [
+        "trade.submit"
+      ],
+      "available": true,
+      "operation": {
+        "method": "POST",
+        "path": "/sonar/markets/{market}/execution/submit",
+        "mcp_tool": "strata_execution_submit"
+      }
+    },
+    {
+      "id": "receive_receipt",
+      "kind": "receipt",
+      "summary": "Receive the execution ID, Solana signature, and submitted status.",
+      "required_capabilities": [],
+      "available": true
+    }
+  ],
+  "edges": [
+    {
+      "from": "discover_capabilities",
+      "to": "discover_action_graph",
+      "condition": "the returned contract version is supported"
+    },
+    {
+      "from": "discover_action_graph",
+      "to": "discover_markets",
+      "condition": "markets.read is enabled"
+    },
+    {
+      "from": "discover_markets",
+      "to": "request_quote",
+      "condition": "quotes.read is enabled and the market is ready"
+    },
+    {
+      "from": "request_quote",
+      "to": "request_execution_challenge",
+      "condition": "trade.prepare is enabled and the quote is unexpired"
+    },
+    {
+      "from": "request_execution_challenge",
+      "to": "sign_authorization",
+      "condition": "the challenge bindings match the quote and signer"
+    },
+    {
+      "from": "sign_authorization",
+      "to": "prepare_execution",
+      "condition": "a valid external authorization signature is available"
+    },
+    {
+      "from": "prepare_execution",
+      "to": "sign_transaction",
+      "condition": "the prepared transaction preserves the signed bindings"
+    },
+    {
+      "from": "sign_transaction",
+      "to": "submit_execution",
+      "condition": "trade.submit is enabled and the signed transaction is unmodified"
+    },
+    {
+      "from": "submit_execution",
+      "to": "receive_receipt",
+      "condition": "the execution ID and idempotency key match"
+    }
+  ]
+} as const;
+
+export const STRATA_ACTION_GRAPH_URI = "strata://action-graph/v1";
+
+export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_markets. Read strata://agent-harness/v1 and strata://action-graph/v1. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve the market, side, exact input atoms, and tolerance before strata_quote. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute: request a challenge, sign its canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. Stop on ambiguity, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";
