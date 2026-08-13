@@ -76,7 +76,8 @@ manifest at `/.well-known/strata-agent.json` and the graph at
 
 The external agent owner decides what its agent may do and configures its
 signer. MCP can request authorization bytes, prepare quote-bound trades or
-resting-order controls, and submit the externally signed result. It accepts
+atomic place, cancel, cancel-all, replace, or bounded batch order controls, and
+submit the externally signed result. It accepts
 public keys, detached signatures, and signed transactions, never private keys,
 seed phrases, or wallet secrets. Amounts are token atoms encoded as base-10
 strings.

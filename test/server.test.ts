@@ -501,6 +501,36 @@ test("protocol tool discovery and calls obey the current public policy", async (
     assert.equal(orderStatusResult.isError, undefined);
     assert.equal(orderStatusRequest?.orderControlId, orderPrepared.order_control_id);
 
+    const batchResult = await protocolClient.callTool({
+      name: "strata_order_challenge",
+      arguments: {
+        marketId: platformMarketId,
+        action: "batch",
+        ownerWallet: "11111111111111111111111111111111",
+        sessionPublicKey: "22222222222222222222222222222222",
+        operations: [
+          { action: "cancel", orderId: "order_33333333333333333333333333333333" },
+          {
+            action: "replace",
+            orderId: "order_55555555555555555555555555555555",
+            accountSequence: "8",
+            clientOrderId: "replacement-8",
+            side: "sell",
+            orderType: "post_only",
+            limitPriceAtoms: "151000000",
+            sizeAtoms: "2000000",
+          },
+        ],
+      },
+    });
+    assert.equal(batchResult.isError, undefined);
+    const batchRequest = orderChallengeRequest as PlatformOrderChallengeInput | undefined;
+    assert.equal(batchRequest?.action, "batch");
+    if (batchRequest?.action === "batch") {
+      assert.equal(batchRequest.operations.length, 2);
+      assert.equal(batchRequest.operations[1]?.action, "replace");
+    }
+
     liveCatalog = {
       ...liveCatalog,
       capabilities: liveCatalog.capabilities.map((capability) =>

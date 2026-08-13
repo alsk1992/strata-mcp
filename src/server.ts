@@ -13,6 +13,7 @@ import {
   type QuoteRequest,
   type QuoteResponse,
   type PlatformOrderChallengeInput,
+  type PlatformOrderBatchOperation,
   type PlatformOrderStatusResponse,
 } from "@stratabook/sdk";
 import * as z from "zod/v4";
@@ -297,7 +298,7 @@ export async function createStrataMcpServer(
         return toolResult(
           response,
           `Sonar ${response.side} quote: ${response.amount_in_consumed_atoms} input atoms `
-            + `for ${response.amount_out_atoms} output atoms; minimum `
+            + `for ${response.amount_out_atoms} user-net output atoms; user-net minimum `
             + `${response.minimum_output_atoms}; expires at ${response.expires_at_ms}.`,
         );
       }),
@@ -442,10 +443,10 @@ export async function createStrataMcpServer(
     {
       title: "Strata order challenge",
       description:
-        "Bind a product-level place, cancel, or cancel-all request to canonical bytes for the agent owner's external signer.",
+        "Bind an atomic place, cancel, cancel-all, replace, or bounded batch request to canonical bytes for the agent owner's external signer.",
       inputSchema: {
         marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
-        action: z.enum(["place", "cancel", "cancel_all"]),
+        action: z.enum(["place", "cancel", "cancel_all", "replace", "batch"]),
         ownerWallet: z.string().min(32).max(44),
         sessionPublicKey: z.string().min(32).max(44),
         accountSequence: z.string().regex(/^[0-9]+$/).max(20).optional(),
@@ -455,6 +456,16 @@ export async function createStrataMcpServer(
         limitPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
         sizeAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
         orderId: z.string().regex(/^order_[0-9a-f]{32}$/).optional(),
+        operations: z.array(z.object({
+          action: z.enum(["place", "cancel", "replace"]),
+          accountSequence: z.string().regex(/^[0-9]+$/).max(20).optional(),
+          clientOrderId: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
+          side: z.enum(["buy", "sell"]).optional(),
+          orderType: z.enum(["good_until_cancelled", "post_only"]).optional(),
+          limitPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+          sizeAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+          orderId: z.string().regex(/^order_[0-9a-f]{32}$/).optional(),
+        }).strict()).min(1).max(6).optional(),
       },
       annotations: {
         readOnlyHint: false,
@@ -501,11 +512,85 @@ export async function createStrataMcpServer(
           sessionPublicKey: args.sessionPublicKey,
           orderId: args.orderId,
         };
-      } else {
+      } else if (args.action === "cancel_all") {
         request = {
           action: "cancel_all",
           ownerWallet: args.ownerWallet,
           sessionPublicKey: args.sessionPublicKey,
+        };
+      } else if (args.action === "replace") {
+        if (
+          args.orderId === undefined
+          || args.accountSequence === undefined
+          || args.clientOrderId === undefined
+          || args.side === undefined
+          || args.orderType === undefined
+          || args.limitPriceAtoms === undefined
+          || args.sizeAtoms === undefined
+        ) {
+          return toolError(
+            "invalid_request",
+            "Replace requires orderId, accountSequence, clientOrderId, side, orderType, limitPriceAtoms, and sizeAtoms.",
+            false,
+          );
+        }
+        request = {
+          action: "replace",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+          orderId: args.orderId,
+          accountSequence: args.accountSequence,
+          clientOrderId: args.clientOrderId,
+          side: args.side,
+          orderType: args.orderType,
+          limitPriceAtoms: args.limitPriceAtoms,
+          sizeAtoms: args.sizeAtoms,
+        };
+      } else {
+        if (args.operations === undefined) {
+          return toolError("invalid_request", "Batch requires operations.", false);
+        }
+        const operations: PlatformOrderBatchOperation[] = [];
+        for (const operation of args.operations) {
+          if (operation.action === "cancel") {
+            if (operation.orderId === undefined) {
+              return toolError("invalid_request", "Batch cancel requires orderId.", false);
+            }
+            operations.push({ action: "cancel", orderId: operation.orderId });
+            continue;
+          }
+          if (
+            operation.accountSequence === undefined
+            || operation.clientOrderId === undefined
+            || operation.side === undefined
+            || operation.orderType === undefined
+            || operation.limitPriceAtoms === undefined
+            || operation.sizeAtoms === undefined
+            || (operation.action === "replace" && operation.orderId === undefined)
+          ) {
+            return toolError(
+              "invalid_request",
+              `Batch ${operation.action} has incomplete fields.`,
+              false,
+            );
+          }
+          const place = {
+            accountSequence: operation.accountSequence,
+            clientOrderId: operation.clientOrderId,
+            side: operation.side,
+            orderType: operation.orderType,
+            limitPriceAtoms: operation.limitPriceAtoms,
+            sizeAtoms: operation.sizeAtoms,
+          };
+          operations.push(operation.action === "replace"
+            ? { action: "replace", orderId: operation.orderId!, ...place }
+            : { action: "place", ...place });
+        }
+        request = {
+          action: "batch",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+          operations,
         };
       }
       const response = await platformClient.orders.challenge(args.marketId, request);
