@@ -80,7 +80,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "authorize_writes",
-      "instruction": "When prepare and submit are exposed, keep signing external to Strata: request canonical authorization bytes, sign them with the owner-configured signer, verify the prepared transaction preserves the quote or exact opaque order set, then submit the externally signed transaction with idempotency. Resting-order control uses place, cancel, or cancel-all and cancel-all is atomically bounded to six orders per call."
+      "instruction": "When prepare and submit are exposed, keep signing external to Strata: request canonical authorization bytes, sign them with the owner-configured signer, verify the prepared transaction preserves the quote or exact opaque order set, then submit the externally signed transaction with idempotency. Resting-order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations."
     },
     {
       "id": "monitor_outcome",
@@ -371,7 +371,7 @@ export const STRATA_ACTION_GRAPH = {
     {
       "id": "request_order_challenge",
       "kind": "prepare",
-      "summary": "Bind a product-level place, cancel, or cancel-all operation to canonical authorization bytes.",
+      "summary": "Bind a product-level place, cancel, bounded cancel-all, atomic replace, or atomic batch operation to canonical authorization bytes.",
       "required_capabilities": [
         "orders.prepare"
       ],
@@ -592,4 +592,4 @@ export const STRATA_ACTION_GRAPH = {
 
 export const STRATA_ACTION_GRAPH_URI = "strata://action-graph/v1";
 
-export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_markets. Read strata://agent-harness/v1 and strata://action-graph/v1. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve the market, side, exact input atoms, and tolerance before strata_quote. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute or control a resting order: request a challenge, verify its quote or exact opaque order bindings, sign canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. If order submission is ambiguous, recover durable status with the same control ID and idempotency key. Cancel-all is atomically bounded to six orders per call. Stop on ambiguity, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";
+export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_markets. Read strata://agent-harness/v1 and strata://action-graph/v1. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve the market, side, exact input atoms, and tolerance before strata_quote. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute or control a resting order: request a challenge, verify its quote or exact opaque order bindings, sign canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. If order submission is ambiguous, recover durable status with the same control ID and idempotency key. Order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations. Stop on ambiguity, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";
