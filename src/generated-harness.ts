@@ -5,11 +5,13 @@ export const STRATA_AGENT_HARNESS = {
   "harness_version": "1.0",
   "contract_version": "1.1",
   "name": "Strata Agent Harness",
-  "summary": "A capability-gated workflow and executable action graph for agents that discover, quote, prepare, externally sign, and submit Strata operations.",
+  "summary": "A capability-gated workflow and executable action graph for agents that discover, read market and account state, quote, prepare, externally sign, and submit Strata operations.",
   "entrypoints": {
     "documentation": "https://stratabook.org/docs/agent-harness/",
     "capabilities": "https://api.stratabook.app/sonar/capabilities",
     "markets": "https://api.stratabook.app/sonar/markets",
+    "platform_capabilities": "https://api.stratabook.app/v2/capabilities",
+    "platform_markets": "https://api.stratabook.app/v2/markets",
     "action_graph": "https://api.stratabook.app/sonar/action-graph",
     "mcp": "https://api.stratabook.app/mcp",
     "manifest": "https://api.stratabook.app/.well-known/strata-agent.json"
@@ -49,6 +51,14 @@ export const STRATA_AGENT_HARNESS = {
       "instruction": "List markets, select one marked ready, and use its discovered base and quote decimals. Do not guess market identifiers or token decimals."
     },
     {
+      "id": "read_market_data",
+      "instruction": "When books.read is live, use the opaque market ID to read the Strata book, status, fees, and recent trades. Subscribe to the market stream for changes and recover from any sequence gap with a fresh snapshot."
+    },
+    {
+      "id": "read_account",
+      "instruction": "When account.read is live, use the owner-configured signer to authorize the exact wallet, market, request time, and fill limit. Read or stream only the sanitized orders and fills returned by the official SDK, and recover stream gaps from a fresh signed snapshot."
+    },
+    {
       "id": "preserve_atoms",
       "instruction": "Represent token amounts as unsigned base-10 atomic strings. Never pass settlement amounts through floating-point arithmetic."
     },
@@ -62,7 +72,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "report_result",
-      "instruction": "Report consumed input, expected output, minimum output, fees by asset side, price impact, and remaining validity without inventing private route composition."
+      "instruction": "Report consumed input, expected output, minimum output, fees by asset side, price impact, and remaining validity."
     },
     {
       "id": "authorize_writes",
@@ -140,6 +150,141 @@ export const STRATA_ACTION_GRAPH = {
         "method": "GET",
         "path": "/sonar/action-graph",
         "mcp_tool": "strata_action_graph"
+      }
+    },
+    {
+      "id": "discover_platform_capabilities",
+      "kind": "discovery",
+      "summary": "Read the versioned capabilities available through the official SDK.",
+      "required_capabilities": [],
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/v2/capabilities"
+      }
+    },
+    {
+      "id": "discover_platform_markets",
+      "kind": "discovery",
+      "summary": "Discover opaque market IDs and current market status.",
+      "required_capabilities": [
+        "markets.read"
+      ],
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/v2/markets"
+      }
+    },
+    {
+      "id": "read_book",
+      "kind": "read",
+      "summary": "Read a sequenced Strata book snapshot.",
+      "required_capabilities": [
+        "books.read"
+      ],
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/v2/markets/{market_id}/book"
+      }
+    },
+    {
+      "id": "read_market_status",
+      "kind": "read",
+      "summary": "Read tick size, minimum order size, and current market status.",
+      "required_capabilities": [
+        "books.read"
+      ],
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/v2/markets/{market_id}/status"
+      }
+    },
+    {
+      "id": "read_best_bid_ask",
+      "kind": "read",
+      "summary": "Read the current best bid and ask.",
+      "required_capabilities": [
+        "books.read"
+      ],
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/v2/markets/{market_id}/bbo"
+      }
+    },
+    {
+      "id": "read_fees",
+      "kind": "read",
+      "summary": "Read the market fee schedule.",
+      "required_capabilities": [
+        "books.read"
+      ],
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/v2/markets/{market_id}/fees"
+      }
+    },
+    {
+      "id": "read_trades",
+      "kind": "read",
+      "summary": "Read recent anonymized trades.",
+      "required_capabilities": [
+        "books.read"
+      ],
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/v2/markets/{market_id}/trades"
+      }
+    },
+    {
+      "id": "stream_market",
+      "kind": "read",
+      "summary": "Subscribe to book changes, trades, and heartbeats with automatic recovery.",
+      "required_capabilities": [
+        "books.read"
+      ],
+      "available": true,
+      "operation": {
+        "method": "WEBSOCKET",
+        "path": "/v2/markets/{market_id}/stream"
+      }
+    },
+    {
+      "id": "authorize_account_read",
+      "kind": "external_signature",
+      "summary": "The agent owner's configured signer authorizes the exact account request or stream challenge.",
+      "required_capabilities": [],
+      "available": true
+    },
+    {
+      "id": "read_account",
+      "kind": "read",
+      "summary": "Read the owner's sanitized open orders and fills for a Strata market.",
+      "required_capabilities": [
+        "account.read"
+      ],
+      "available": true,
+      "operation": {
+        "method": "GET",
+        "path": "/v2/markets/{market_id}/account/{wallet_address}"
+      }
+    },
+    {
+      "id": "stream_account",
+      "kind": "read",
+      "summary": "Subscribe to signed, sequenced order and fill state for the owner.",
+      "required_capabilities": [
+        "account.read"
+      ],
+      "available": true,
+      "operation": {
+        "method": "WEBSOCKET",
+        "path": "/v2/markets/{market_id}/account/{wallet_address}/stream"
       }
     },
     {
@@ -230,6 +375,61 @@ export const STRATA_ACTION_GRAPH = {
       "from": "discover_action_graph",
       "to": "discover_markets",
       "condition": "markets.read is enabled"
+    },
+    {
+      "from": "discover_action_graph",
+      "to": "discover_platform_capabilities",
+      "condition": "the versioned SDK contract is supported"
+    },
+    {
+      "from": "discover_platform_capabilities",
+      "to": "discover_platform_markets",
+      "condition": "markets.read is enabled"
+    },
+    {
+      "from": "discover_platform_markets",
+      "to": "read_book",
+      "condition": "books.read is enabled and the market is active"
+    },
+    {
+      "from": "discover_platform_markets",
+      "to": "read_market_status",
+      "condition": "books.read is enabled"
+    },
+    {
+      "from": "discover_platform_markets",
+      "to": "read_best_bid_ask",
+      "condition": "books.read is enabled"
+    },
+    {
+      "from": "discover_platform_markets",
+      "to": "read_fees",
+      "condition": "books.read is enabled"
+    },
+    {
+      "from": "discover_platform_markets",
+      "to": "read_trades",
+      "condition": "books.read is enabled"
+    },
+    {
+      "from": "read_book",
+      "to": "stream_market",
+      "condition": "books.read is enabled and the snapshot sequence is accepted"
+    },
+    {
+      "from": "discover_platform_markets",
+      "to": "authorize_account_read",
+      "condition": "account.read is enabled and the owner-configured signer is available"
+    },
+    {
+      "from": "authorize_account_read",
+      "to": "read_account",
+      "condition": "the signature binds the wallet, market, request time, and fill limit"
+    },
+    {
+      "from": "read_account",
+      "to": "stream_account",
+      "condition": "the stream challenge is signed by the same owner-configured signer"
     },
     {
       "from": "discover_markets",
