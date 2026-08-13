@@ -20,6 +20,8 @@ import type {
   PlatformOrderChallengeResponse,
   PlatformOrderPrepareInput,
   PlatformOrderPrepareResponse,
+  PlatformOrderStatusInput,
+  PlatformOrderStatusResponse,
   PlatformOrderSubmitInput,
   PlatformOrderSubmitResponse,
 } from "@stratabook/sdk";
@@ -227,6 +229,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
   let orderChallengeRequest: PlatformOrderChallengeInput | undefined;
   let orderPrepareRequest: PlatformOrderPrepareInput | undefined;
   let orderSubmitRequest: PlatformOrderSubmitInput | undefined;
+  let orderStatusRequest: PlatformOrderStatusInput | undefined;
   const challenge: ExecutionChallengeResponse = {
     schema_version: 1,
     contract_version: CONTRACT_VERSION,
@@ -295,6 +298,12 @@ test("protocol tool discovery and calls obey the current public policy", async (
     signature: submitted.signature,
     status: "submitted",
   };
+  const orderStatus: PlatformOrderStatusResponse = {
+    ...orderSubmitted,
+    status: "submitted",
+    failure_code: null,
+    updated_at_ms: 1_785_420_001_000,
+  };
   const fakeClient = {
     capabilities: async () => liveCatalog,
     actionGraph: async () => STRATA_ACTION_GRAPH,
@@ -329,6 +338,10 @@ test("protocol tool discovery and calls obey the current public policy", async (
       submit: async (_marketId: string, request: PlatformOrderSubmitInput) => {
         orderSubmitRequest = request;
         return orderSubmitted;
+      },
+      status: async (_marketId: string, request: PlatformOrderStatusInput) => {
+        orderStatusRequest = request;
+        return orderStatus;
       },
     },
   } as unknown as StrataPlatformClient;
@@ -381,6 +394,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_markets",
         "strata_order_challenge",
         "strata_order_prepare",
+        "strata_order_status",
         "strata_order_submit",
         "strata_quote",
       ],
@@ -476,6 +490,17 @@ test("protocol tool discovery and calls obey the current public policy", async (
     assert.equal(orderSubmitResult.isError, undefined);
     assert.equal(orderSubmitRequest?.orderControlId, orderPrepared.order_control_id);
 
+    const orderStatusResult = await protocolClient.callTool({
+      name: "strata_order_status",
+      arguments: {
+        marketId: platformMarketId,
+        orderControlId: orderPrepared.order_control_id,
+        idempotencyKey: orderPrepared.order_control_id,
+      },
+    });
+    assert.equal(orderStatusResult.isError, undefined);
+    assert.equal(orderStatusRequest?.orderControlId, orderPrepared.order_control_id);
+
     liveCatalog = {
       ...liveCatalog,
       capabilities: liveCatalog.capabilities.map((capability) =>
@@ -507,6 +532,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_markets",
         "strata_order_challenge",
         "strata_order_prepare",
+        "strata_order_status",
         "strata_order_submit",
       ],
     );

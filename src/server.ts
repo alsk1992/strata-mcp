@@ -13,6 +13,7 @@ import {
   type QuoteRequest,
   type QuoteResponse,
   type PlatformOrderChallengeInput,
+  type PlatformOrderStatusResponse,
 } from "@stratabook/sdk";
 import * as z from "zod/v4";
 import {
@@ -55,6 +56,7 @@ type ToolHandles = {
   orderChallenge: RegisteredTool;
   orderPrepare: RegisteredTool;
   orderSubmit: RegisteredTool;
+  orderStatus: RegisteredTool;
 };
 
 export function capabilityAvailable(catalog: CapabilityCatalog, id: string): boolean {
@@ -585,6 +587,37 @@ export async function createStrataMcpServer(
       }),
   );
 
+  const orderStatus = server.registerTool(
+    "strata_order_status",
+    {
+      title: "Read Strata order-control status",
+      description:
+        "Recover the durable result for an externally signed order submission after a timeout or restart.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        orderControlId: z.string().regex(/^or_[0-9a-f]{32}$/),
+        idempotencyKey: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, orderControlId, idempotencyKey }) =>
+      guardedTool(client, "orders.submit", async () => {
+        const response: PlatformOrderStatusResponse = await platformClient.orders.status(
+          marketId,
+          { orderControlId, idempotencyKey },
+        );
+        return toolResult(
+          response,
+          `Order control ${response.order_control_id} is ${response.status}.`,
+        );
+      }),
+  );
+
   const handles: ToolHandles = {
     markets,
     quote,
@@ -594,6 +627,7 @@ export async function createStrataMcpServer(
     orderChallenge,
     orderPrepare,
     orderSubmit,
+    orderStatus,
   };
   applyCapabilityCatalog(handles, initialCatalog);
   let closed = false;
@@ -628,6 +662,7 @@ function applyCapabilityCatalog(handles: ToolHandles, catalog: CapabilityCatalog
   setToolEnabled(handles.orderChallenge, capabilityAvailable(catalog, "orders.prepare"));
   setToolEnabled(handles.orderPrepare, capabilityAvailable(catalog, "orders.prepare"));
   setToolEnabled(handles.orderSubmit, capabilityAvailable(catalog, "orders.submit"));
+  setToolEnabled(handles.orderStatus, capabilityAvailable(catalog, "orders.submit"));
 }
 
 function setToolEnabled(tool: RegisteredTool, enabled: boolean): void {

@@ -27,7 +27,8 @@ export const STRATA_AGENT_HARNESS = {
       "strata_execution_submit",
       "strata_order_challenge",
       "strata_order_prepare",
-      "strata_order_submit"
+      "strata_order_submit",
+      "strata_order_status"
     ],
     "terminal": [
       "npx -y @stratabook/sdk capabilities --json",
@@ -83,7 +84,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "monitor_outcome",
-      "instruction": "After an authorized submission, report the durable receipt or explicit failure. Never claim completion from preparation, signing, or an unconfirmed request."
+      "instruction": "After an authorized submission, report the durable receipt or explicit failure. If the request times out or either process restarts, recover it with the same control ID and idempotency key. Never claim completion from preparation, signing, or an unconfirmed request."
     }
   ],
   "stop_conditions": [
@@ -429,6 +430,20 @@ export const STRATA_ACTION_GRAPH = {
       "summary": "Receive the opaque order IDs, transaction signature, and submitted status.",
       "required_capabilities": [],
       "available": true
+    },
+    {
+      "id": "recover_order_status",
+      "kind": "read",
+      "summary": "Recover durable submitting, submitted, or failed status after a timeout or restart.",
+      "required_capabilities": [
+        "orders.submit"
+      ],
+      "available": false,
+      "operation": {
+        "method": "POST",
+        "path": "/v2/markets/{market_id}/orders/status",
+        "mcp_tool": "strata_order_status"
+      }
     }
   ],
   "edges": [
@@ -561,10 +576,20 @@ export const STRATA_ACTION_GRAPH = {
       "from": "submit_order_control",
       "to": "receive_order_receipt",
       "condition": "the control ID and idempotency key match"
+    },
+    {
+      "from": "submit_order_control",
+      "to": "recover_order_status",
+      "condition": "the submission result is ambiguous or either process restarted"
+    },
+    {
+      "from": "recover_order_status",
+      "to": "receive_order_receipt",
+      "condition": "durable status is submitted"
     }
   ]
 } as const;
 
 export const STRATA_ACTION_GRAPH_URI = "strata://action-graph/v1";
 
-export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_markets. Read strata://agent-harness/v1 and strata://action-graph/v1. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve the market, side, exact input atoms, and tolerance before strata_quote. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute or control a resting order: request a challenge, verify its quote or exact opaque order bindings, sign canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. Cancel-all is atomically bounded to six orders per call. Stop on ambiguity, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";
+export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_markets. Read strata://agent-harness/v1 and strata://action-graph/v1. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve the market, side, exact input atoms, and tolerance before strata_quote. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute or control a resting order: request a challenge, verify its quote or exact opaque order bindings, sign canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. If order submission is ambiguous, recover durable status with the same control ID and idempotency key. Cancel-all is atomically bounded to six orders per call. Stop on ambiguity, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";

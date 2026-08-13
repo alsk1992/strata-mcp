@@ -35,6 +35,7 @@ The tools currently available are:
 - `strata_order_challenge`, when `orders.prepare` is enabled for MCP
 - `strata_order_prepare`, when `orders.prepare` is enabled for MCP
 - `strata_order_submit`, when `orders.submit` is enabled for MCP
+- `strata_order_status`, when `orders.submit` is enabled for MCP
 
 Every initialization response carries the compact Strata Agent Harness. The
 server also publishes the complete harness as the
