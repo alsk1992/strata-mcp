@@ -24,7 +24,10 @@ export const STRATA_AGENT_HARNESS = {
       "strata_quote",
       "strata_execution_challenge",
       "strata_execution_prepare",
-      "strata_execution_submit"
+      "strata_execution_submit",
+      "strata_order_challenge",
+      "strata_order_prepare",
+      "strata_order_submit"
     ],
     "terminal": [
       "npx -y @stratabook/sdk capabilities --json",
@@ -76,7 +79,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "authorize_writes",
-      "instruction": "When prepare and submit are exposed, keep signing external to Strata: request canonical authorization bytes, sign them with the owner-configured signer, verify the prepared transaction preserves the quote, then submit the externally signed transaction with idempotency."
+      "instruction": "When prepare and submit are exposed, keep signing external to Strata: request canonical authorization bytes, sign them with the owner-configured signer, verify the prepared transaction preserves the quote or exact opaque order set, then submit the externally signed transaction with idempotency. Resting-order control uses place, cancel, or cancel-all and cancel-all is atomically bounded to six orders per call."
     },
     {
       "id": "monitor_outcome",
@@ -363,6 +366,69 @@ export const STRATA_ACTION_GRAPH = {
       "summary": "Receive the execution ID, Solana signature, and submitted status.",
       "required_capabilities": [],
       "available": true
+    },
+    {
+      "id": "request_order_challenge",
+      "kind": "prepare",
+      "summary": "Bind a product-level place, cancel, or cancel-all operation to canonical authorization bytes.",
+      "required_capabilities": [
+        "orders.prepare"
+      ],
+      "available": false,
+      "operation": {
+        "method": "POST",
+        "path": "/v2/markets/{market_id}/orders/challenge",
+        "mcp_tool": "strata_order_challenge"
+      }
+    },
+    {
+      "id": "sign_order_authorization",
+      "kind": "external_signature",
+      "summary": "The agent owner's configured session signer verifies the exact order set and signs externally.",
+      "required_capabilities": [],
+      "available": true
+    },
+    {
+      "id": "prepare_order_control",
+      "kind": "prepare",
+      "summary": "Exchange the order authorization signature for a partially signed transaction.",
+      "required_capabilities": [
+        "orders.prepare"
+      ],
+      "available": false,
+      "operation": {
+        "method": "POST",
+        "path": "/v2/markets/{market_id}/orders/prepare",
+        "mcp_tool": "strata_order_prepare"
+      }
+    },
+    {
+      "id": "sign_order_transaction",
+      "kind": "external_signature",
+      "summary": "The external session signer verifies and fills only its transaction signature slot.",
+      "required_capabilities": [],
+      "available": true
+    },
+    {
+      "id": "submit_order_control",
+      "kind": "submit",
+      "summary": "Submit the unchanged signed order transaction with an idempotency key.",
+      "required_capabilities": [
+        "orders.submit"
+      ],
+      "available": false,
+      "operation": {
+        "method": "POST",
+        "path": "/v2/markets/{market_id}/orders/submit",
+        "mcp_tool": "strata_order_submit"
+      }
+    },
+    {
+      "id": "receive_order_receipt",
+      "kind": "receipt",
+      "summary": "Receive the opaque order IDs, transaction signature, and submitted status.",
+      "required_capabilities": [],
+      "available": true
     }
   ],
   "edges": [
@@ -465,10 +531,40 @@ export const STRATA_ACTION_GRAPH = {
       "from": "submit_execution",
       "to": "receive_receipt",
       "condition": "the execution ID and idempotency key match"
+    },
+    {
+      "from": "discover_platform_markets",
+      "to": "request_order_challenge",
+      "condition": "orders.prepare is enabled and the market accepts order control"
+    },
+    {
+      "from": "request_order_challenge",
+      "to": "sign_order_authorization",
+      "condition": "the action and exact opaque order set match owner intent"
+    },
+    {
+      "from": "sign_order_authorization",
+      "to": "prepare_order_control",
+      "condition": "a valid external authorization signature is available"
+    },
+    {
+      "from": "prepare_order_control",
+      "to": "sign_order_transaction",
+      "condition": "the prepared transaction preserves the signed order bindings"
+    },
+    {
+      "from": "sign_order_transaction",
+      "to": "submit_order_control",
+      "condition": "orders.submit is enabled and the signed transaction is unmodified"
+    },
+    {
+      "from": "submit_order_control",
+      "to": "receive_order_receipt",
+      "condition": "the control ID and idempotency key match"
     }
   ]
 } as const;
 
 export const STRATA_ACTION_GRAPH_URI = "strata://action-graph/v1";
 
-export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_markets. Read strata://agent-harness/v1 and strata://action-graph/v1. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve the market, side, exact input atoms, and tolerance before strata_quote. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute: request a challenge, sign its canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. Stop on ambiguity, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";
+export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_markets. Read strata://agent-harness/v1 and strata://action-graph/v1. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve the market, side, exact input atoms, and tolerance before strata_quote. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute or control a resting order: request a challenge, verify its quote or exact opaque order bindings, sign canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. Cancel-all is atomically bounded to six orders per call. Stop on ambiguity, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";

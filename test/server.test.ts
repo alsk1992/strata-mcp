@@ -15,6 +15,13 @@ import type {
   QuoteRequest,
   QuoteResponse,
   StrataClient,
+  StrataPlatformClient,
+  PlatformOrderChallengeInput,
+  PlatformOrderChallengeResponse,
+  PlatformOrderPrepareInput,
+  PlatformOrderPrepareResponse,
+  PlatformOrderSubmitInput,
+  PlatformOrderSubmitResponse,
 } from "@stratabook/sdk";
 import { CONTRACT_VERSION } from "@stratabook/sdk";
 import {
@@ -157,6 +164,26 @@ test("protocol tool discovery and calls obey the current public policy", async (
         public_sdk: true,
         mcp_exposure: "submit",
       },
+      {
+        id: "orders.prepare",
+        introduced_in: "1.1",
+        stability: "beta",
+        required_scope: "orders:prepare",
+        risk: "prepare",
+        default_enabled: true,
+        public_sdk: true,
+        mcp_exposure: "prepare",
+      },
+      {
+        id: "orders.submit",
+        introduced_in: "1.1",
+        stability: "beta",
+        required_scope: "orders:submit",
+        risk: "submit",
+        default_enabled: true,
+        public_sdk: true,
+        mcp_exposure: "submit",
+      },
     ],
   };
   const markets: MarketsResponse = {
@@ -197,6 +224,9 @@ test("protocol tool discovery and calls obey the current public policy", async (
   let challengeRequest: ExecutionChallengeRequest | undefined;
   let prepareRequest: ExecutionPrepareRequest | undefined;
   let submitRequest: ExecutionSubmitRequest | undefined;
+  let orderChallengeRequest: PlatformOrderChallengeInput | undefined;
+  let orderPrepareRequest: PlatformOrderPrepareInput | undefined;
+  let orderSubmitRequest: PlatformOrderSubmitInput | undefined;
   const challenge: ExecutionChallengeResponse = {
     schema_version: 1,
     contract_version: CONTRACT_VERSION,
@@ -231,6 +261,40 @@ test("protocol tool discovery and calls obey the current public policy", async (
     signature: "1111111111111111111111111111111111111111111111111111111111111111",
     status: "submitted",
   };
+  const platformMarketId = "market_22222222222222222222222222222222";
+  const orderChallenge: PlatformOrderChallengeResponse = {
+    schema_version: 2,
+    contract_version: "2.0",
+    challenge_id: "oc_11111111111111111111111111111111",
+    market_id: platformMarketId,
+    action: "cancel_all",
+    order_ids: ["order_33333333333333333333333333333333"],
+    authorization_payload_base64: "AQ==",
+    server_time_ms: 1_785_420_000_000,
+    expires_at_ms: 1_785_420_060_000,
+  };
+  const orderPrepared: PlatformOrderPrepareResponse = {
+    schema_version: 2,
+    contract_version: "2.0",
+    order_control_id: "or_44444444444444444444444444444444",
+    market_id: platformMarketId,
+    action: "cancel_all",
+    order_ids: orderChallenge.order_ids,
+    transaction_base64: "AQ==",
+    recent_blockhash: "11111111111111111111111111111111",
+    last_valid_block_height: 123,
+    expires_at_ms: orderChallenge.expires_at_ms,
+  };
+  const orderSubmitted: PlatformOrderSubmitResponse = {
+    schema_version: 2,
+    contract_version: "2.0",
+    order_control_id: orderPrepared.order_control_id,
+    market_id: platformMarketId,
+    action: "cancel_all",
+    order_ids: orderChallenge.order_ids,
+    signature: submitted.signature,
+    status: "submitted",
+  };
   const fakeClient = {
     capabilities: async () => liveCatalog,
     actionGraph: async () => STRATA_ACTION_GRAPH,
@@ -252,7 +316,26 @@ test("protocol tool discovery and calls obey the current public policy", async (
       return submitted;
     },
   } as unknown as StrataClient;
-  const runtime = await createStrataMcpServer({ client: fakeClient });
+  const fakePlatformClient = {
+    orders: {
+      challenge: async (_marketId: string, request: PlatformOrderChallengeInput) => {
+        orderChallengeRequest = request;
+        return orderChallenge;
+      },
+      prepare: async (_marketId: string, request: PlatformOrderPrepareInput) => {
+        orderPrepareRequest = request;
+        return orderPrepared;
+      },
+      submit: async (_marketId: string, request: PlatformOrderSubmitInput) => {
+        orderSubmitRequest = request;
+        return orderSubmitted;
+      },
+    },
+  } as unknown as StrataPlatformClient;
+  const runtime = await createStrataMcpServer({
+    client: fakeClient,
+    platformClient: fakePlatformClient,
+  });
   const protocolClient = new Client({ name: "strata-mcp-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
@@ -296,6 +379,9 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_execution_prepare",
         "strata_execution_submit",
         "strata_markets",
+        "strata_order_challenge",
+        "strata_order_prepare",
+        "strata_order_submit",
         "strata_quote",
       ],
     );
@@ -355,6 +441,41 @@ test("protocol tool discovery and calls obey the current public policy", async (
     assert.equal(submitResult.isError, undefined);
     assert.equal(submitRequest?.executionId, prepared.execution_id);
 
+    const orderChallengeResult = await protocolClient.callTool({
+      name: "strata_order_challenge",
+      arguments: {
+        marketId: platformMarketId,
+        action: "cancel_all",
+        ownerWallet: "11111111111111111111111111111111",
+        sessionPublicKey: "22222222222222222222222222222222",
+      },
+    });
+    assert.equal(orderChallengeResult.isError, undefined);
+    assert.equal(orderChallengeRequest?.action, "cancel_all");
+
+    const orderPrepareResult = await protocolClient.callTool({
+      name: "strata_order_prepare",
+      arguments: {
+        marketId: platformMarketId,
+        challengeId: orderChallenge.challenge_id,
+        authorizationSignature: "2".repeat(64),
+      },
+    });
+    assert.equal(orderPrepareResult.isError, undefined);
+    assert.equal(orderPrepareRequest?.challengeId, orderChallenge.challenge_id);
+
+    const orderSubmitResult = await protocolClient.callTool({
+      name: "strata_order_submit",
+      arguments: {
+        marketId: platformMarketId,
+        orderControlId: orderPrepared.order_control_id,
+        signedTransactionBase64: "AQ==",
+        idempotencyKey: orderPrepared.order_control_id,
+      },
+    });
+    assert.equal(orderSubmitResult.isError, undefined);
+    assert.equal(orderSubmitRequest?.orderControlId, orderPrepared.order_control_id);
+
     liveCatalog = {
       ...liveCatalog,
       capabilities: liveCatalog.capabilities.map((capability) =>
@@ -384,6 +505,9 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_execution_prepare",
         "strata_execution_submit",
         "strata_markets",
+        "strata_order_challenge",
+        "strata_order_prepare",
+        "strata_order_submit",
       ],
     );
   } finally {

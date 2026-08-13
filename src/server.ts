@@ -4,6 +4,7 @@ import {
   DEFAULT_SLIPPAGE_BPS,
   StrataApiError,
   StrataClient,
+  StrataPlatformClient,
   type CapabilityCatalog,
   type ExecutionChallengeRequest,
   type ExecutionPrepareRequest,
@@ -11,6 +12,7 @@ import {
   type MarketsResponse,
   type QuoteRequest,
   type QuoteResponse,
+  type PlatformOrderChallengeInput,
 } from "@stratabook/sdk";
 import * as z from "zod/v4";
 import {
@@ -25,6 +27,7 @@ export interface StrataMcpOptions {
   apiBase?: string;
   timeoutMs?: number;
   client?: StrataClient;
+  platformClient?: StrataPlatformClient;
 }
 
 export interface StrataMcpRuntime {
@@ -49,6 +52,9 @@ type ToolHandles = {
   executionChallenge: RegisteredTool;
   executionPrepare: RegisteredTool;
   executionSubmit: RegisteredTool;
+  orderChallenge: RegisteredTool;
+  orderPrepare: RegisteredTool;
+  orderSubmit: RegisteredTool;
 };
 
 export function capabilityAvailable(catalog: CapabilityCatalog, id: string): boolean {
@@ -90,6 +96,10 @@ export async function createStrataMcpServer(
   options: StrataMcpOptions = {},
 ): Promise<StrataMcpRuntime> {
   const client = strataClient(options);
+  const platformClient = options.platformClient ?? new StrataPlatformClient({
+    apiBase: options.apiBase,
+    timeoutMs: options.timeoutMs,
+  });
   const initialCatalog = await client.capabilities();
   if (initialCatalog.contract_version !== STRATA_AGENT_HARNESS.contract_version) {
     throw new Error("agent harness and live contract versions differ");
@@ -425,12 +435,165 @@ export async function createStrataMcpServer(
       }),
   );
 
+  const orderChallenge = server.registerTool(
+    "strata_order_challenge",
+    {
+      title: "Strata order challenge",
+      description:
+        "Bind a product-level place, cancel, or cancel-all request to canonical bytes for the agent owner's external signer.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        action: z.enum(["place", "cancel", "cancel_all"]),
+        ownerWallet: z.string().min(32).max(44),
+        sessionPublicKey: z.string().min(32).max(44),
+        accountSequence: z.string().regex(/^[0-9]+$/).max(20).optional(),
+        clientOrderId: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
+        side: z.enum(["buy", "sell"]).optional(),
+        orderType: z.enum(["good_until_cancelled", "post_only"]).optional(),
+        limitPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        sizeAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        orderId: z.string().regex(/^order_[0-9a-f]{32}$/).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (args) => guardedTool(client, "orders.prepare", async () => {
+      let request: PlatformOrderChallengeInput;
+      if (args.action === "place") {
+        if (
+          args.accountSequence === undefined
+          || args.clientOrderId === undefined
+          || args.side === undefined
+          || args.orderType === undefined
+          || args.limitPriceAtoms === undefined
+          || args.sizeAtoms === undefined
+        ) {
+          return toolError(
+            "invalid_request",
+            "Place requires accountSequence, clientOrderId, side, orderType, limitPriceAtoms, and sizeAtoms.",
+            false,
+          );
+        }
+        request = {
+          action: "place",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+          accountSequence: args.accountSequence,
+          clientOrderId: args.clientOrderId,
+          side: args.side,
+          orderType: args.orderType,
+          limitPriceAtoms: args.limitPriceAtoms,
+          sizeAtoms: args.sizeAtoms,
+        };
+      } else if (args.action === "cancel") {
+        if (args.orderId === undefined) {
+          return toolError("invalid_request", "Cancel requires orderId.", false);
+        }
+        request = {
+          action: "cancel",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+          orderId: args.orderId,
+        };
+      } else {
+        request = {
+          action: "cancel_all",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+        };
+      }
+      const response = await platformClient.orders.challenge(args.marketId, request);
+      return toolResult(
+        response,
+        `Order challenge ${response.challenge_id} binds ${response.order_ids.length} opaque order ID(s); expires at ${response.expires_at_ms}.`,
+      );
+    }),
+  );
+
+  const orderPrepare = server.registerTool(
+    "strata_order_prepare",
+    {
+      title: "Prepare Strata order control",
+      description:
+        "Exchange an externally signed order challenge for an immutable partially signed transaction.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        challengeId: z.string().regex(/^oc_[0-9a-f]{32}$/),
+        authorizationSignature: z
+          .string()
+          .min(64)
+          .max(88)
+          .regex(/^[1-9A-HJ-NP-Za-km-z]+$/),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, challengeId, authorizationSignature }) =>
+      guardedTool(client, "orders.prepare", async () => {
+        const response = await platformClient.orders.prepare(marketId, {
+          challengeId,
+          authorizationSignature,
+        });
+        return toolResult(
+          response,
+          `Prepared ${response.action} control ${response.order_control_id}; externally verify and sign before ${response.expires_at_ms}.`,
+        );
+      }),
+  );
+
+  const orderSubmit = server.registerTool(
+    "strata_order_submit",
+    {
+      title: "Submit Strata order control",
+      description: "Submit an externally signed order transaction with a stable retry key.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        orderControlId: z.string().regex(/^or_[0-9a-f]{32}$/),
+        signedTransactionBase64: z
+          .string()
+          .min(4)
+          .max(8_192)
+          .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+        idempotencyKey: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, orderControlId, signedTransactionBase64, idempotencyKey }) =>
+      guardedTool(client, "orders.submit", async () => {
+        const response = await platformClient.orders.submit(marketId, {
+          orderControlId,
+          signedTransactionBase64,
+          idempotencyKey,
+        });
+        return toolResult(
+          response,
+          `Submitted ${response.action} control ${response.order_control_id} as ${response.signature}.`,
+        );
+      }),
+  );
+
   const handles: ToolHandles = {
     markets,
     quote,
     executionChallenge,
     executionPrepare,
     executionSubmit,
+    orderChallenge,
+    orderPrepare,
+    orderSubmit,
   };
   applyCapabilityCatalog(handles, initialCatalog);
   let closed = false;
@@ -462,6 +625,9 @@ function applyCapabilityCatalog(handles: ToolHandles, catalog: CapabilityCatalog
   setToolEnabled(handles.executionChallenge, capabilityAvailable(catalog, "trade.prepare"));
   setToolEnabled(handles.executionPrepare, capabilityAvailable(catalog, "trade.prepare"));
   setToolEnabled(handles.executionSubmit, capabilityAvailable(catalog, "trade.submit"));
+  setToolEnabled(handles.orderChallenge, capabilityAvailable(catalog, "orders.prepare"));
+  setToolEnabled(handles.orderPrepare, capabilityAvailable(catalog, "orders.prepare"));
+  setToolEnabled(handles.orderSubmit, capabilityAvailable(catalog, "orders.submit"));
 }
 
 function setToolEnabled(tool: RegisteredTool, enabled: boolean): void {
