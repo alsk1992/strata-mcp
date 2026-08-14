@@ -5,7 +5,7 @@ export const STRATA_AGENT_HARNESS = {
   "harness_version": "1.0",
   "contract_version": "1.1",
   "name": "Strata Agent Harness",
-  "summary": "A capability-gated workflow and executable action graph for agents that discover, read market and account state, quote, prepare, externally sign, and submit Strata operations.",
+  "summary": "A capability-gated workflow and executable action graph for agents that discover, read, stream low-latency order commands, externally sign, and safely submit Strata operations.",
   "entrypoints": {
     "documentation": "https://stratabook.org/docs/agent-harness/",
     "capabilities": "https://api.stratabook.app/sonar/capabilities",
@@ -34,7 +34,8 @@ export const STRATA_AGENT_HARNESS = {
       "npx -y @stratabook/sdk capabilities --json",
       "npx -y @stratabook/sdk action-graph --json",
       "npx -y @stratabook/sdk markets --json",
-      "npx -y @stratabook/sdk quote --market SOL/USDC --side sell --amount-atoms 10000000 --json"
+      "npx -y @stratabook/sdk quote --market SOL/USDC --side sell --amount-atoms 10000000 --json",
+      "npx -y @stratabook/sdk order-slo --market-id MARKET_ID --owner-wallet OWNER_PUBLIC_KEY --json"
     ]
   },
   "workflow": [
@@ -80,11 +81,23 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "authorize_writes",
-      "instruction": "When prepare and submit are exposed, keep signing external to Strata: request canonical authorization bytes, sign them with the owner-configured signer, verify the prepared transaction preserves the quote or exact opaque order set, then submit the externally signed transaction with idempotency. Resting-order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations."
+      "instruction": "When prepare and submit are exposed, keep signing external to Strata: request canonical authorization bytes, sign them with the owner-configured signer, verify the prepared transaction preserves the quote or exact opaque order set, then submit the externally signed transaction with idempotency. Resting-order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations. Every incoming resting order selects an explicit self-trade prevention policy; no policy permits a self-fill."
+    },
+    {
+      "id": "stream_order_commands",
+      "instruction": "When orders.prepare and orders.submit advertise websocket transport, use the official SDK persistent order-command connection. Sign its owner/session/market challenge externally, require contiguous sequences and correlated request IDs, treat the submit result as RPC broadcast only, and consume the pushed terminal status without blocking the placement hot path."
+    },
+    {
+      "id": "maintain_dead_man",
+      "instruction": "Before leaving resting exposure unattended, arm an exact externally verified and pre-signed cancel-all ticket, then maintain its SDK heartbeat. Dropping the guard or losing the agent must stop heartbeats and fail closed into cancellation; disarm only through an explicit owner-authorized action."
+    },
+    {
+      "id": "certify_order_command_slo",
+      "instruction": "Use the official non-trading order-command certification harness before release and on the production schedule. Retain its machine-readable connection count, load, latency percentiles, sequence/error rate, thresholds, and pass/fail result; package support alone is not a latency claim."
     },
     {
       "id": "monitor_outcome",
-      "instruction": "After an authorized submission, report the durable receipt or explicit failure. If the request times out or either process restarts, recover it with the same control ID and idempotency key. Never claim completion from preparation, signing, or an unconfirmed request."
+      "instruction": "After an authorized submission, report the RPC-broadcast receipt and then the durable terminal status or explicit failure. If the request times out or either process restarts, recover it with the same control ID and idempotency key. Never claim chain completion from preparation, signing, or the immediate broadcast receipt."
     }
   ],
   "stop_conditions": [
@@ -100,6 +113,7 @@ export const STRATA_AGENT_HARNESS = {
     "Never request or accept wallet secrets, private keys, seed phrases, session keys, or production credentials in a prompt.",
     "Never call undocumented endpoints or reconstruct private Sonar behavior.",
     "Never silently widen slippage, refresh changed economics, substitute a market, or retry a non-retryable failure.",
+    "Never select a self-trade policy implicitly, suppress an order-command sequence gap, or disarm a dead-man ticket merely because the client is shutting down.",
     "Treat capability removal, revocation, expiry, and emergency disable as immediate stop signals.",
     "Capability and action-graph availability are authoritative for Strata operations; permission and signer policy remain controlled by the external agent owner."
   ]
@@ -432,6 +446,48 @@ export const STRATA_ACTION_GRAPH = {
       "available": true
     },
     {
+      "id": "open_order_command_stream",
+      "kind": "prepare",
+      "summary": "Authenticate one persistent sequenced order channel for low-latency commands, explicit self-trade policy, and pushed confirmation.",
+      "required_capabilities": [
+        "orders.prepare",
+        "orders.submit"
+      ],
+      "available": false,
+      "operation": {
+        "method": "WEBSOCKET",
+        "path": "/v2/markets/{market_id}/orders/stream"
+      }
+    },
+    {
+      "id": "maintain_dead_man",
+      "kind": "submit",
+      "summary": "Arm and heartbeat an exact pre-signed cancel-all that executes if the agent stops responding.",
+      "required_capabilities": [
+        "orders.prepare",
+        "orders.submit"
+      ],
+      "available": false,
+      "operation": {
+        "method": "WEBSOCKET",
+        "path": "/v2/markets/{market_id}/orders/stream"
+      }
+    },
+    {
+      "id": "certify_order_command_slo",
+      "kind": "read",
+      "summary": "Measure authenticated command latency, concurrency, sequence integrity, and error rate without submitting a trade.",
+      "required_capabilities": [
+        "orders.prepare",
+        "orders.submit"
+      ],
+      "available": false,
+      "operation": {
+        "method": "WEBSOCKET",
+        "path": "/v2/markets/{market_id}/orders/stream"
+      }
+    },
+    {
       "id": "recover_order_status",
       "kind": "read",
       "summary": "Recover durable submitting, submitted, or failed status after a timeout or restart.",
@@ -549,6 +605,26 @@ export const STRATA_ACTION_GRAPH = {
     },
     {
       "from": "discover_platform_markets",
+      "to": "open_order_command_stream",
+      "condition": "orders.prepare and orders.submit advertise websocket transport and the owner-configured session signer is available"
+    },
+    {
+      "from": "open_order_command_stream",
+      "to": "request_order_challenge",
+      "condition": "signed socket authentication succeeds and an explicit self-trade prevention policy is selected"
+    },
+    {
+      "from": "open_order_command_stream",
+      "to": "maintain_dead_man",
+      "condition": "the exact cancel-all authorization and transaction are externally verified and signed"
+    },
+    {
+      "from": "open_order_command_stream",
+      "to": "certify_order_command_slo",
+      "condition": "a release or recurring production load certificate is required"
+    },
+    {
+      "from": "discover_platform_markets",
       "to": "request_order_challenge",
       "condition": "orders.prepare is enabled and the market accepts order control"
     },
@@ -583,6 +659,11 @@ export const STRATA_ACTION_GRAPH = {
       "condition": "the submission result is ambiguous or either process restarted"
     },
     {
+      "from": "submit_order_control",
+      "to": "maintain_dead_man",
+      "condition": "the agent has resting exposure that must fail closed on disconnect"
+    },
+    {
       "from": "recover_order_status",
       "to": "receive_order_receipt",
       "condition": "durable status is submitted"
@@ -592,4 +673,4 @@ export const STRATA_ACTION_GRAPH = {
 
 export const STRATA_ACTION_GRAPH_URI = "strata://action-graph/v1";
 
-export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_markets. Read strata://agent-harness/v1 and strata://action-graph/v1. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve the market, side, exact input atoms, and tolerance before strata_quote. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute or control a resting order: request a challenge, verify its quote or exact opaque order bindings, sign canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. If order submission is ambiguous, recover durable status with the same control ID and idempotency key. Order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations. Stop on ambiguity, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";
+export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_markets. Read strata://agent-harness/v1 and strata://action-graph/v1. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve the market, side, exact input atoms, and tolerance before strata_quote. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute or control a resting order: request a challenge, verify its quote or exact opaque order bindings, sign canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. When websocket order transport is live, prefer the official SDK persistent command stream, choose explicit self-trade prevention, keep its durable dead-man guard armed for resting exposure, and distinguish immediate RPC broadcast from pushed terminal chain status. If submission is ambiguous, recover durable status with the same control ID and idempotency key. Order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations. Stop on ambiguity, sequence gaps, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";
