@@ -1,8 +1,8 @@
 # Strata MCP
 
-Official capability-gated MCP access to Strata and Sonar. The server is a thin adapter
-over `@stratabook/sdk`: it follows the live capability catalog and contains no
-private execution logic.
+Official capability-gated MCP access to Strata and Sonar. The server delegates
+to `@stratabook/sdk`: it follows the live capability catalog and contains no
+separate quote or execution logic.
 
 ## Local stdio
 
@@ -27,11 +27,36 @@ The tools currently available are:
 
 - `strata_capabilities`
 - `strata_action_graph`
+- `strata_platform_graph`
+- `strata_status`
+- `strata_candles`
+- `strata_marks`
+- `strata_twaps`
+- `strata_twap_challenge`
+- `strata_twap_cancel`
+- `strata_twap_prepare`
+- `strata_twap_submit`
+- `strata_portfolio`
+- `strata_portfolio_history`
+- `strata_market_making_status`
+- `strata_market_making_reputation`
+- `strata_vault_status`
+- `strata_vault_setup`, `strata_vault_deposit`, `strata_vault_withdraw`, `strata_vault_delegate`, `strata_vault_policy`, `strata_vault_pause` — prepare owner actions with Strata as sponsored fee payer
+- `strata_vault_submit` — submit the owner-signed preparation; Strata pays and broadcasts
+- `strata_vault_submission` — durable outcome of a submission
+- `strata_rewards`
+- `strata_referrals`
+- `strata_referral_link` — prepare externally signable consent or submit the signed link
+- `strata_referral_claim` — prepare externally signable consent or submit the signed claim
+- `strata_bugs`
+- `strata_bug_submit` — prepare externally signable bytes or submit the signed report
 - `strata_markets`, when `markets.read` is enabled for MCP
-- `strata_quote`, when `quotes.read` is enabled for MCP
+- `strata_quote` and `strata_exact_output_quote` (spend X / receive at least Y), when market quotes are enabled for MCP
+- `strata_swap_quote`, when catalog-asset swap quotes are enabled for MCP
 - `strata_execution_challenge`, when `trade.prepare` is enabled for MCP
 - `strata_execution_prepare`, when `trade.prepare` is enabled for MCP
 - `strata_execution_submit`, when `trade.submit` is enabled for MCP
+- `strata_execution_status` — recover a durable immediate-execution receipt
 - `strata_order_challenge`, when `orders.prepare` is enabled for MCP
 - `strata_order_prepare`, when `orders.prepare` is enabled for MCP
 - `strata_order_submit`, when `orders.submit` is enabled for MCP
@@ -42,7 +67,8 @@ server also publishes the complete harness as the
 `strata://agent-harness/v1` resource and provides a `strata_start` prompt for
 applying it to one concrete objective.
 The live executable topology is also available as
-`strata://action-graph/v1`.
+`strata://action-graph/v1`. The complete entity, operation, and workflow map is
+available as `strata://platform-graph/v2`.
 
 The tool list follows the live public policy. Every call rechecks that policy,
 so a disabled capability stops immediately even if a client cached an older
@@ -75,13 +101,14 @@ manifest at `/.well-known/strata-agent.json` and the graph at
 ## Safety
 
 The external agent owner decides what its agent may do and configures its
-signer. MCP can request authorization bytes, prepare quote-bound trades or
-atomic place, cancel, cancel-all, replace, or bounded batch order controls, and
+signer. MCP can request authorization bytes, prepare quote-bound trades,
+bounded TWAP placement or cancellation, or atomic place, cancel, cancel-all,
+replace, or bounded batch order controls, and
 submit the externally signed result. It accepts
 public keys, detached signatures, and signed transactions, never private keys,
 seed phrases, or wallet secrets. Amounts are token atoms encoded as base-10
 strings.
 
-Quotes default to zero execution tolerance. An agent can request a non-zero
-`slippageBps` explicitly when its task accepts a lower minimum output; price
-impact remains a separate measure of current market depth.
+Quotes default to zero tolerance. `maximumToleranceBps` is the agent's own
+floor (the most it accepts below the quoted output); `price_impact_pct` is
+measured from the book. They are unrelated, and every quote result states both.

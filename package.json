@@ -1,6 +1,6 @@
 {
   "name": "@stratabook/mcp",
-  "version": "0.1.12",
+  "version": "0.2.0",
   "description": "Connect AI agents to Strata markets and Sonar quotes with MCP.",
   "type": "module",
   "license": "MIT OR Apache-2.0",
@@ -44,7 +44,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
-    "@stratabook/sdk": "0.1.11",
+    "@stratabook/sdk": "0.2.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

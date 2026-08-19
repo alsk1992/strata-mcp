@@ -1,7 +1,7 @@
 import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
-  DEFAULT_SLIPPAGE_BPS,
+  DEFAULT_MAXIMUM_TOLERANCE_BPS,
   StrataApiError,
   StrataClient,
   StrataPlatformClient,
@@ -10,12 +10,27 @@ import {
   type ExecutionPrepareRequest,
   type ExecutionSubmitRequest,
   type MarketsResponse,
+  type PlatformMarket,
   type QuoteRequest,
   type QuoteResponse,
   type PlatformOrderChallengeInput,
+  type PlatformTwapChallengeInput,
   type PlatformOrderBatchOperation,
   type PlatformOrderStatusResponse,
+  type PlatformActionGraphResponse,
+  type PlatformSwapQuoteResponse,
+  type PlatformReferralClaimResponse,
+  type PlatformReferralLinkResponse,
+  type PlatformOrderExecuteOperation,
+  type PlatformTwapExecuteOperation,
 } from "@stratabook/sdk";
+import {
+  decideAutonomy,
+  estimateBaseNotionalUsd,
+  quoteNotionalUsd,
+  MarketMetaResolver,
+  type SessionAutonomy,
+} from "./autonomy.js";
 import * as z from "zod/v4";
 import {
   STRATA_AGENT_HARNESS,
@@ -30,6 +45,12 @@ export interface StrataMcpOptions {
   timeoutMs?: number;
   client?: StrataClient;
   platformClient?: StrataPlatformClient;
+  /**
+   * When set, the MCP may finish trades itself with this Vault session key,
+   * bounded by the user-owned autonomy slider. Absent = the calm default:
+   * every trade is prepared for a human to sign. Built from env in the CLI.
+   */
+  sessionAutonomy?: SessionAutonomy;
 }
 
 export interface StrataMcpRuntime {
@@ -47,10 +68,12 @@ export interface StrataMcpReadiness {
 }
 
 const REFRESH_INTERVAL_MS = 5_000;
+export const STRATA_PLATFORM_GRAPH_URI = "strata://platform-graph/v2";
 
 type ToolHandles = {
   markets: RegisteredTool;
   quote: RegisteredTool;
+  exactOutputQuote: RegisteredTool;
   executionChallenge: RegisteredTool;
   executionPrepare: RegisteredTool;
   executionSubmit: RegisteredTool;
@@ -95,6 +118,204 @@ export async function probeStrataMcpReadiness(
   };
 }
 
+type OrderOperationArgs = {
+  action: "place" | "cancel" | "cancel_all" | "replace" | "batch";
+  ownerWallet: string;
+  sessionPublicKey: string;
+  accountSequence?: string | undefined;
+  clientOrderId?: string | undefined;
+  side?: "buy" | "sell" | undefined;
+  orderType?: "good_until_cancelled" | "post_only" | undefined;
+  limitPriceAtoms?: string | undefined;
+  sizeAtoms?: string | undefined;
+  orderId?: string | undefined;
+  operations?: Array<{
+    action: "place" | "cancel" | "replace";
+    accountSequence?: string | undefined;
+    clientOrderId?: string | undefined;
+    side?: "buy" | "sell" | undefined;
+    orderType?: "good_until_cancelled" | "post_only" | undefined;
+    limitPriceAtoms?: string | undefined;
+    sizeAtoms?: string | undefined;
+    orderId?: string | undefined;
+  }> | undefined;
+};
+
+/** Map tool arguments onto one order-control operation, or a tool error. */
+function orderOperationFromArgs(
+  args: OrderOperationArgs,
+): PlatformOrderChallengeInput | ReturnType<typeof toolError> {
+      let request: PlatformOrderChallengeInput;
+      if (args.action === "place") {
+        if (
+          args.clientOrderId === undefined
+          || args.side === undefined
+          || args.orderType === undefined
+          || args.limitPriceAtoms === undefined
+          || args.sizeAtoms === undefined
+        ) {
+          return toolError(
+            "invalid_request",
+            "Place requires clientOrderId, side, orderType, limitPriceAtoms, and sizeAtoms.",
+            false,
+          );
+        }
+        request = {
+          action: "place",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+          ...(args.accountSequence === undefined ? {} : { accountSequence: args.accountSequence }),
+          clientOrderId: args.clientOrderId,
+          side: args.side,
+          orderType: args.orderType,
+          limitPriceAtoms: args.limitPriceAtoms,
+          sizeAtoms: args.sizeAtoms,
+        };
+      } else if (args.action === "cancel") {
+        if (args.orderId === undefined) {
+          return toolError("invalid_request", "Cancel requires orderId.", false);
+        }
+        request = {
+          action: "cancel",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+          orderId: args.orderId,
+        };
+      } else if (args.action === "cancel_all") {
+        request = {
+          action: "cancel_all",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+        };
+      } else if (args.action === "replace") {
+        if (
+          args.orderId === undefined
+          || args.clientOrderId === undefined
+          || args.side === undefined
+          || args.orderType === undefined
+          || args.limitPriceAtoms === undefined
+          || args.sizeAtoms === undefined
+        ) {
+          return toolError(
+            "invalid_request",
+            "Replace requires orderId, clientOrderId, side, orderType, limitPriceAtoms, and sizeAtoms.",
+            false,
+          );
+        }
+        request = {
+          action: "replace",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+          orderId: args.orderId,
+          ...(args.accountSequence === undefined ? {} : { accountSequence: args.accountSequence }),
+          clientOrderId: args.clientOrderId,
+          side: args.side,
+          orderType: args.orderType,
+          limitPriceAtoms: args.limitPriceAtoms,
+          sizeAtoms: args.sizeAtoms,
+        };
+      } else {
+        if (args.operations === undefined) {
+          return toolError("invalid_request", "Batch requires operations.", false);
+        }
+        const operations: PlatformOrderBatchOperation[] = [];
+        for (const operation of args.operations) {
+          if (operation.action === "cancel") {
+            if (operation.orderId === undefined) {
+              return toolError("invalid_request", "Batch cancel requires orderId.", false);
+            }
+            operations.push({ action: "cancel", orderId: operation.orderId });
+            continue;
+          }
+          if (
+            operation.clientOrderId === undefined
+            || operation.side === undefined
+            || operation.orderType === undefined
+            || operation.limitPriceAtoms === undefined
+            || operation.sizeAtoms === undefined
+            || (operation.action === "replace" && operation.orderId === undefined)
+          ) {
+            return toolError(
+              "invalid_request",
+              `Batch ${operation.action} has incomplete fields.`,
+              false,
+            );
+          }
+          const place = {
+            ...(operation.accountSequence === undefined
+              ? {}
+              : { accountSequence: operation.accountSequence }),
+            clientOrderId: operation.clientOrderId,
+            side: operation.side,
+            orderType: operation.orderType,
+            limitPriceAtoms: operation.limitPriceAtoms,
+            sizeAtoms: operation.sizeAtoms,
+          };
+          operations.push(operation.action === "replace"
+            ? { action: "replace", orderId: operation.orderId!, ...place }
+            : { action: "place", ...place });
+        }
+        request = {
+          action: "batch",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+          operations,
+        };
+      }
+      return request;
+}
+
+/** Opaque platform identity attached to each market the `strata_markets` tool lists. */
+interface PlatformMarketIdentity {
+  readonly market_id: string;
+  readonly base_asset_id: string;
+  readonly quote_asset_id: string;
+  readonly status: PlatformMarket["status"];
+  readonly available_actions: PlatformMarket["available_actions"];
+}
+
+type MarketsToolResponse = Omit<MarketsResponse, "markets"> & {
+  readonly markets: ReadonlyArray<MarketsResponse["markets"][number] & Partial<PlatformMarketIdentity>>;
+};
+
+const PLATFORM_MARKET_PAGE_LIMIT = 100;
+const PLATFORM_MARKET_MAX_PAGES = 20;
+
+/**
+ * Every live platform market keyed by label, so the tool can hand agents the
+ * opaque `market_id` (and asset ids) that every by-market tool takes. A
+ * platform read failure leaves the list unidentified rather than failing it.
+ */
+async function platformMarketIdentities(
+  platformClient: Pick<StrataPlatformClient, "markets">,
+): Promise<Map<string, PlatformMarketIdentity>> {
+  const identities = new Map<string, PlatformMarketIdentity>();
+  try {
+    let cursor: string | undefined;
+    for (let page = 0; page < PLATFORM_MARKET_MAX_PAGES; page += 1) {
+      const response = await platformClient.markets.list(
+        cursor === undefined
+          ? { limit: PLATFORM_MARKET_PAGE_LIMIT }
+          : { limit: PLATFORM_MARKET_PAGE_LIMIT, cursor },
+      );
+      for (const market of response.markets) {
+        identities.set(market.label, {
+          market_id: market.market_id,
+          base_asset_id: market.base_asset_id,
+          quote_asset_id: market.quote_asset_id,
+          status: market.status,
+          available_actions: market.available_actions,
+        });
+      }
+      if (!response.page.has_more || response.page.next_cursor === null) break;
+      cursor = response.page.next_cursor;
+    }
+  } catch {
+    // Identity is a convenience layered on the Sonar list; never fail the list for it.
+  }
+  return identities;
+}
+
 export async function createStrataMcpServer(
   options: StrataMcpOptions = {},
 ): Promise<StrataMcpRuntime> {
@@ -131,6 +352,26 @@ export async function createStrataMcpServer(
           uri: STRATA_AGENT_HARNESS_URI,
           mimeType: "application/json",
           text: JSON.stringify(STRATA_AGENT_HARNESS),
+        },
+      ],
+    }),
+  );
+
+  server.registerResource(
+    "strata_platform_graph",
+    STRATA_PLATFORM_GRAPH_URI,
+    {
+      title: "Strata Platform Graph",
+      description:
+        "Complete customer-safe entity, operation, and workflow graph with live capability gates.",
+      mimeType: "application/json",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: STRATA_PLATFORM_GRAPH_URI,
+          mimeType: "application/json",
+          text: JSON.stringify(await platformClient.discovery.graph()),
         },
       ],
     }),
@@ -215,6 +456,995 @@ export async function createStrataMcpServer(
     async () => toolResult(await client.actionGraph(), "Current Strata action graph."),
   );
 
+  server.registerTool(
+    "strata_platform_graph",
+    {
+      title: "Strata platform graph",
+      description:
+        "Discover every public module, entity relationship, operation binding, workflow, and live availability gate.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => {
+      const graph: PlatformActionGraphResponse = await platformClient.discovery.graph();
+      const liveOperations = graph.operations.filter((operation) => operation.available).length;
+      return toolResult(
+        graph,
+        `${liveOperations} of ${graph.operations.length} mapped Strata operations are currently live.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_market_making_status",
+    {
+      title: "Read Strata maker status",
+      description:
+        "A maker's products, live exposure, health, and kill state in one market — public by wallet address, no signature.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, walletAddress }) => {
+      const response = await platformClient.marketMaking.status(marketId, walletAddress);
+      return toolResult(
+        response,
+        `${response.active_products} active maker products; reconcile intent, Strand, Current, signed-quote, and dead-man state before changing exposure.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_market_making_reputation",
+    {
+      title: "Read Strata maker reputation",
+      description:
+        "A maker's reliability, participation, tier, and signed-quote eligibility in one market — public by wallet address, no signature.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, walletAddress }) => toolResult(
+      await platformClient.marketMaking.reputation(marketId, walletAddress),
+      "Maker reputation record. Use tier_progress and signed_quote_stream_eligible before choosing a maker transport.",
+    ),
+  );
+
+  server.registerTool(
+    "strata_status",
+    {
+      title: "Strata status",
+      description: "Read product-level readiness and the number of currently live mapped operations.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => {
+      const status = await platformClient.discovery.status();
+      return toolResult(
+        status,
+        `Strata is ${status.status}; ${status.available_operations} mapped operations are live.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_candles",
+    {
+      title: "Strata candles",
+      description: "Read bounded time-bucketed candles for one opaque Strata market ID.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        fromMs: z.number().int().nonnegative(),
+        toMs: z.number().int().positive(),
+        resolutionSeconds: z.number().int().min(60).max(86_400).optional().default(300),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, fromMs, toMs, resolutionSeconds }) => {
+      const candles = await platformClient.marketData.candles(marketId, {
+        fromMs,
+        toMs,
+        resolutionSeconds,
+      });
+      return toolResult(candles, `${candles.candles.length} Strata candles returned.`);
+    },
+  );
+
+  server.registerTool(
+    "strata_marks",
+    {
+      title: "Strata mark",
+      description: "Read the current customer-facing reference price for one opaque market ID.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId }) => {
+      const mark = await platformClient.marketData.mark(marketId);
+      return toolResult(mark, mark.stale ? "Strata mark is stale." : "Current Strata mark.");
+    },
+  );
+
+  server.registerTool(
+    "strata_book",
+    {
+      title: "Strata order book",
+      description:
+        "Read the executable order book for one opaque market ID: bids and asks, one size per price "
+        + "level. Top of book is the best bid and ask.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        depth: z
+          .number()
+          .int()
+          .min(1)
+          .max(2_000)
+          .optional()
+          .describe("Price levels per side (default server depth; max 2000)."),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, depth }) => {
+      const book = await platformClient.books.snapshot(
+        marketId,
+        depth === undefined ? {} : { depth },
+      );
+      return toolResult(
+        book,
+        `Book for ${marketId}: ${book.bids.length} bid / ${book.asks.length} ask levels at sequence ${book.sequence}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_bbo",
+    {
+      title: "Strata best bid/ask",
+      description:
+        "Read the current best bid and best ask (top of book) for one opaque market ID.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId }) => {
+      const bbo = await platformClient.books.bestBidAsk(marketId);
+      return toolResult(
+        bbo,
+        `BBO for ${marketId}: bid ${bbo.best_bid?.price_atoms ?? "—"} / ask ${bbo.best_ask?.price_atoms ?? "—"}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_trades",
+    {
+      title: "Strata recent trades",
+      description:
+        "Read recent anonymized prints for one opaque market ID: price, size, side, and time.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe("Most recent prints to return (default server limit; max 500)."),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, limit }) => {
+      const trades = await platformClient.books.trades(
+        marketId,
+        limit === undefined ? {} : { limit },
+      );
+      return toolResult(trades, `${trades.trades.length} recent prints for ${marketId}.`);
+    },
+  );
+
+  server.registerTool(
+    "strata_execution_status",
+    {
+      title: "Strata execution status",
+      description: "Recover prepared state or a restart-durable confirmed execution receipt.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        executionId: z.string().regex(/^se_[0-9a-f]{32}$/),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, executionId }) => {
+      const receipt = await platformClient.executions.status(marketId, executionId);
+      return toolResult(receipt, `Execution is ${receipt.status}.`);
+    },
+  );
+
+  server.registerTool(
+    "strata_twaps",
+    {
+      title: "Strata TWAPs",
+      description: "Read sanitized progress and terminal receipts for wallet-owned TWAP schedules.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, walletAddress }) => {
+      const response = await platformClient.algos.twaps(marketId, walletAddress);
+      return toolResult(response, `${response.twaps.length} TWAP schedules returned.`);
+    },
+  );
+
+  server.registerTool(
+    "strata_twap_challenge",
+    {
+      title: "Prepare a Strata TWAP authorization",
+      description: "Request exact external-signing bytes for a bounded TWAP schedule.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        ownerWallet: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        sessionPublicKey: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        side: z.enum(["buy", "sell"]),
+        totalSizeAtoms: z.string().regex(/^[1-9][0-9]*$/),
+        slicesTotal: z.number().int().min(2).max(120),
+        maximumToleranceBps: z.number().int().min(1).max(1_000),
+        intervalSlots: z.number().int().min(25).max(4_500),
+        limitPriceAtoms: z.string().regex(/^[1-9][0-9]*$/),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      const response = await platformClient.algos.challenge(input.marketId, {
+        action: "place",
+        ownerWallet: input.ownerWallet,
+        sessionPublicKey: input.sessionPublicKey,
+        side: input.side,
+        totalSizeAtoms: input.totalSizeAtoms,
+        slicesTotal: input.slicesTotal,
+        maximumToleranceBps: input.maximumToleranceBps,
+        intervalSlots: input.intervalSlots,
+        limitPriceAtoms: input.limitPriceAtoms,
+      });
+      return toolResult(response, "Sign the returned authorization payload externally.");
+    },
+  );
+
+  server.registerTool(
+    "strata_twap_cancel",
+    {
+      title: "Prepare Strata TWAP cancellation",
+      description: "Request exact external-signing bytes to cancel one active owned TWAP.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        ownerWallet: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        sessionPublicKey: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        twapId: z.string().regex(/^twap_[0-9a-f]{32}$/),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      const response = await platformClient.algos.challenge(input.marketId, {
+        action: "cancel",
+        ownerWallet: input.ownerWallet,
+        sessionPublicKey: input.sessionPublicKey,
+        twapId: input.twapId,
+      });
+      return toolResult(response, "Sign the returned cancellation payload externally.");
+    },
+  );
+
+  server.registerTool(
+    "strata_twap_prepare",
+    {
+      title: "Prepare Strata TWAP transaction",
+      description:
+        "Prepare a canonical TWAP transaction. One signature: pass the action itself (place fields or twapId to cancel) and sign only the returned transaction. (A challengeId + authorizationSignature is still accepted.)",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        challengeId: z.string().regex(/^twc_[0-9a-f]{32}$/).optional(),
+        authorizationSignature: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{64,88}$/).optional(),
+        action: z.enum(["place", "cancel"]).optional(),
+        ownerWallet: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/).optional(),
+        sessionPublicKey: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/).optional(),
+        side: z.enum(["buy", "sell"]).optional(),
+        totalSizeAtoms: z.string().regex(/^[1-9][0-9]*$/).optional(),
+        slicesTotal: z.number().int().min(2).max(120).optional(),
+        maximumToleranceBps: z.number().int().min(1).max(1_000).optional(),
+        intervalSlots: z.number().int().min(25).max(4_500).optional(),
+        limitPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).optional(),
+        twapId: z.string().regex(/^twap_[0-9a-f]{32}$/).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      if (input.challengeId !== undefined || input.authorizationSignature !== undefined) {
+        if (input.challengeId === undefined || input.authorizationSignature === undefined) {
+          return toolError("invalid_request", "The two-step path needs both challengeId and authorizationSignature.", false);
+        }
+        const response = await platformClient.algos.prepare(input.marketId, {
+          challengeId: input.challengeId,
+          authorizationSignature: input.authorizationSignature,
+        });
+        return toolResult(response, "Verify and sign this canonical transaction externally.");
+      }
+      if (input.ownerWallet === undefined || input.sessionPublicKey === undefined || input.action === undefined) {
+        return toolError("invalid_request", "Pass action, ownerWallet, and sessionPublicKey (or a signed challenge).", false);
+      }
+      let operation: PlatformTwapChallengeInput;
+      if (input.action === "cancel") {
+        if (input.twapId === undefined) return toolError("invalid_request", "Cancel requires twapId.", false);
+        operation = {
+          action: "cancel",
+          ownerWallet: input.ownerWallet,
+          sessionPublicKey: input.sessionPublicKey,
+          twapId: input.twapId,
+        };
+      } else {
+        if (
+          input.side === undefined
+          || input.totalSizeAtoms === undefined
+          || input.slicesTotal === undefined
+          || input.maximumToleranceBps === undefined
+          || input.intervalSlots === undefined
+          || input.limitPriceAtoms === undefined
+        ) {
+          return toolError("invalid_request", "Place requires side, totalSizeAtoms, slicesTotal, maximumToleranceBps, intervalSlots, and limitPriceAtoms.", false);
+        }
+        operation = {
+          action: "place",
+          ownerWallet: input.ownerWallet,
+          sessionPublicKey: input.sessionPublicKey,
+          side: input.side,
+          totalSizeAtoms: input.totalSizeAtoms,
+          slicesTotal: input.slicesTotal,
+          maximumToleranceBps: input.maximumToleranceBps,
+          intervalSlots: input.intervalSlots,
+          limitPriceAtoms: input.limitPriceAtoms,
+        };
+      }
+      const response = await platformClient.algos.prepare(input.marketId, { operation });
+      return toolResult(
+        response,
+        "One signature: verify this canonical transaction, then sign it externally with the session key and submit.",
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_twap_submit",
+    {
+      title: "Submit Strata TWAP transaction",
+      description: "Submit the exact externally signed TWAP transaction idempotently.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        twapControlId: z.string().regex(/^twctl_[0-9a-f]{32}$/),
+        signedTransactionBase64: z.string().min(4),
+        idempotencyKey: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, twapControlId, signedTransactionBase64, idempotencyKey }) => {
+      const response = await platformClient.algos.submit(marketId, {
+        twapControlId,
+        signedTransactionBase64,
+        idempotencyKey,
+      });
+      return toolResult(response, `TWAP action submitted as ${response.signature}.`);
+    },
+  );
+
+  server.registerTool(
+    "strata_portfolio",
+    {
+      title: "Strata account",
+      description:
+        "The whole account in one public read, by wallet address: balances (total / available / locked, exact USD), positions, open orders, and recent fills across every live market. No signature, no session key, no market selection.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress }) => {
+      const response = await platformClient.account.read(walletAddress);
+      const activity = `${response.open_orders.length} open orders, ${response.recent_fills.length} recent fills`
+        + (response.unavailable_market_ids.length > 0
+          ? ` (${response.unavailable_market_ids.length} markets unavailable)`
+          : "");
+      return toolResult(
+        response,
+        response.valuation_complete
+          ? `${response.balances.length} held assets; ${activity}; equity ${response.equity_usd_micros} USD micros at slot ${response.observed_slot}.`
+          : `${response.balances.length} held assets; ${activity}; ${response.unpriced_asset_ids.length} unpriced, USD totals unavailable.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_portfolio_history",
+    {
+      title: "Strata portfolio history",
+      description: "Read genuine stored account-equity history in exact USD micros.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        range: z.enum(["24h", "7d", "30d"]).optional().default("24h"),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress, range }) => {
+      const response = await platformClient.account.portfolioHistory(walletAddress, range);
+      return toolResult(response, `${response.points.length} stored equity samples returned.`);
+    },
+  );
+
+  server.registerTool(
+    "strata_vault_status",
+    {
+      title: "Strata Vault status",
+      description:
+        "Read sealed owner state and optional external-session readiness without construction identifiers.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        sessionPublicKey: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/).optional(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress, sessionPublicKey }) => {
+      const response = await platformClient.vault.status({ walletAddress, sessionPublicKey });
+      return toolResult(
+        response,
+        response.session === null
+          ? `Vault is ${response.state}; no session was requested.`
+          : `Vault is ${response.state}; requested session is ${response.session.state}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_vault_pause",
+    {
+      title: "Prepare Strata Vault pause",
+      description:
+        "Prepare an owner-authorized pause or resume transaction for external verification, signing, and broadcast.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        paused: z.boolean(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress, paused }) => {
+      const response = await platformClient.vault.preparePause({ walletAddress, paused });
+      return toolResult(
+        response,
+        `Verify this ${paused ? "pause" : "resume"} transaction, then owner-sign it and pass preparation_id + the signed transaction to strata_vault_submit (Strata pays the fee when sponsored is true).`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_vault_setup",
+    {
+      title: "Prepare Strata Vault onboarding",
+      description:
+        "One-signature onboarding: register an external session key for a wallet. Only the wallet and the session key are needed; one session then trades every market. Policy fields are optional. A first strata_vault_deposit that names the session key does this in the same transaction.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        sessionPublicKey: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/).optional(),
+        spendingLimits: z
+          .array(
+            z.object({
+              assetId: z.string().regex(/^asset_[0-9a-f]{32}$/),
+              maximumPerExecutionAtoms: z.string().regex(/^[1-9][0-9]*$/).optional(),
+            }),
+          )
+          .max(4)
+          .optional(),
+        expiresAtMs: z.number().int().positive().optional(),
+        minimumIntervalSeconds: z.number().int().min(1).max(86_400).optional(),
+        maximumToleranceBps: z.number().int().min(1).max(1_000).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({
+      walletAddress,
+      sessionPublicKey,
+      marketId,
+      spendingLimits,
+      expiresAtMs,
+      minimumIntervalSeconds,
+      maximumToleranceBps,
+    }) => {
+      const response = await platformClient.vault.prepareSetup({
+        walletAddress,
+        sessionPublicKey,
+        marketId: marketId ?? null,
+        expiresAtMs: expiresAtMs ?? null,
+        minimumIntervalSeconds,
+        maximumToleranceBps,
+        spendingLimits: (spendingLimits ?? []).map((limit) => ({
+          assetId: limit.assetId,
+          maximumPerExecutionAtoms: limit.maximumPerExecutionAtoms ?? null,
+        })),
+      });
+      return toolResult(
+        response,
+        "Verify every echoed session policy field, then owner-sign it and pass preparation_id + the signed transaction to strata_vault_submit (Strata pays the fee when sponsored is true).",
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_vault_deposit",
+    {
+      title: "Prepare Strata Vault deposit",
+      description: "Prepare an exact owner-funded Vault deposit using opaque market and asset IDs. Name sessionPublicKey and a first deposit also registers that session in the same transaction (one owner signature onboards and funds the wallet).",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        assetId: z.string().regex(/^asset_[0-9a-f]{32}$/),
+        amountAtoms: z.string().regex(/^[1-9][0-9]*$/),
+        sessionPublicKey: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress, marketId, assetId, amountAtoms, sessionPublicKey }) => {
+      const response = await platformClient.vault.prepareDeposit({
+        walletAddress,
+        marketId,
+        assetId,
+        amountAtoms,
+        sessionPublicKey: sessionPublicKey ?? null,
+      });
+      return toolResult(
+        response,
+        response.registers_session
+          ? "This deposit also registers the session key. Verify the exact market, asset, amount, and session, then owner-sign it and pass preparation_id + the signed transaction to strata_vault_submit (Strata pays the fee when sponsored is true)."
+          : "Verify the exact market, asset, and amount, then owner-sign it and pass preparation_id + the signed transaction to strata_vault_submit (Strata pays the fee when sponsored is true).",
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_vault_withdraw",
+    {
+      title: "Prepare Strata Vault withdrawal",
+      description:
+        "Prepare an exact owner-authorized withdrawal to a destination wallet.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        assetId: z.string().regex(/^asset_[0-9a-f]{32}$/),
+        destinationWalletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        amountAtoms: z.string().regex(/^[1-9][0-9]*$/),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress, marketId, assetId, destinationWalletAddress, amountAtoms }) => {
+      const response = await platformClient.vault.prepareWithdrawal({
+        walletAddress,
+        marketId,
+        assetId,
+        destinationWalletAddress,
+        amountAtoms,
+      });
+      return toolResult(
+        response,
+        "Verify the exact destination and amount, then owner-sign it and pass preparation_id + the signed transaction to strata_vault_submit (Strata pays the fee when sponsored is true).",
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_vault_delegate",
+    {
+      title: "Prepare Strata Vault session control",
+      description:
+        "Prepare owner-authorized revocation of one externally held Vault session key.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        sessionPublicKey: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        action: z.literal("revoke"),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress, sessionPublicKey, action }) => {
+      const response = await platformClient.vault.prepareDelegate({
+        walletAddress,
+        sessionPublicKey,
+        action,
+      });
+      return toolResult(
+        response,
+        "Verify both identities and the destructive action, then owner-sign it and pass preparation_id + the signed transaction to strata_vault_submit (Strata pays the fee when sponsored is true).",
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_vault_policy",
+    {
+      title: "Prepare Strata Vault withdrawal policy",
+      description:
+        "Prepare an owner-authorized blocked or restricted withdrawal access policy.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        mode: z.enum(["blocked", "restricted"]),
+        allowedWalletAddresses: z.array(
+          z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        ).max(8).optional().default([]),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress, mode, allowedWalletAddresses }) => {
+      const response = await platformClient.vault.preparePolicy({
+        walletAddress,
+        withdrawalAccess: { mode, allowedWalletAddresses },
+      });
+      return toolResult(
+        response,
+        "Verify the exact withdrawal access policy, then owner-sign it and pass preparation_id + the signed transaction to strata_vault_submit (Strata pays the fee when sponsored is true).",
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_vault_submit",
+    {
+      title: "Submit a prepared Strata Vault transaction",
+      description:
+        "Submit an owner-signed prepared Vault transaction (setup, deposit, withdrawal, session, "
+        + "policy, pause). Strata verifies it is exactly the prepared transaction, pays the network "
+        + "fee and any rent when the preparation was sponsored (owners without SOL; recovered later "
+        + "from their deposits as network_cost_atoms), and broadcasts it — the owner needs no SOL "
+        + "and no RPC. Idempotent per idempotencyKey; read the outcome with strata_vault_submission.",
+      inputSchema: {
+        preparationId: z.string().regex(/^vp_[0-9a-f]{32}$/).describe("preparation_id from the prepare response."),
+        signedTransactionBase64: z.string().min(1).describe("The prepared transaction with the owner's signature added, base64."),
+        idempotencyKey: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ preparationId, signedTransactionBase64, idempotencyKey }) => {
+      const response = await platformClient.vault.submit({
+        preparationId,
+        signedTransactionBase64,
+        idempotencyKey,
+      });
+      return toolResult(
+        response,
+        `Vault ${response.action} ${response.status}${response.sponsored ? " (Strata paid the fee)" : ""}: `
+          + `signature ${response.signature}. Poll strata_vault_submission until confirmed.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_vault_submission",
+    {
+      title: "Strata Vault submission status",
+      description: "Read the durable outcome of a submitted Vault transaction: submitted, confirmed, or failed.",
+      inputSchema: {
+        preparationId: z.string().regex(/^vp_[0-9a-f]{32}$/),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ preparationId }) => {
+      const response = await platformClient.vault.submission(preparationId);
+      return toolResult(
+        response,
+        `Vault ${response.action} is ${response.status}`
+          + `${response.failure_code ? ` (${response.failure_code})` : ""}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "strata_rewards",
+    {
+      title: "Strata rewards",
+      description: "Read the current rewards season, standings, and optional owner score.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/).optional(),
+        limit: z.number().int().min(1).max(100).optional().default(25),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress, limit }) => {
+      const response = await platformClient.rewards.read({ walletAddress, limit });
+      return toolResult(response, `${response.standings.length} reward standings returned.`);
+    },
+  );
+
+  server.registerTool(
+    "strata_referrals",
+    {
+      title: "Strata referrals",
+      description: "Read an owner's referral state and exact claimable reward atoms.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress }) => {
+      const response = await platformClient.referrals.read(walletAddress);
+      return toolResult(response, response.enabled ? "Referral state returned." : "Referrals are disabled.");
+    },
+  );
+
+  server.registerTool(
+    "strata_referral_link",
+    {
+      title: "Link a Strata referral",
+      description:
+        "Prepare or submit an externally authorized referral link for a new wallet.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        referralCode: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/),
+        authorizationSignature: z.string().regex(/^(?:0x)?[0-9a-fA-F]{128}$/).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress, referralCode, authorizationSignature }) => {
+      if (authorizationSignature === undefined) {
+        const payload = platformClient.referrals.linkAuthorizationPayload(referralCode);
+        return toolResult({
+          wallet_address: walletAddress,
+          authorization_payload_base64: Buffer.from(payload).toString("base64"),
+        }, "Have the referred wallet sign this payload externally, then call again with its hex signature.");
+      }
+      const response: PlatformReferralLinkResponse = await platformClient.referrals.link({
+        walletAddress,
+        referralCode,
+        authorizationSignature,
+      });
+      return toolResult(response, "Referral link is pending the wallet's first fill.");
+    },
+  );
+
+  server.registerTool(
+    "strata_referral_claim",
+    {
+      title: "Claim Strata referral rewards",
+      description:
+        "Prepare or submit an externally authorized request for currently claimable referral rewards.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        payoutWalletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/).optional(),
+        authorizationSignature: z.string().regex(/^(?:0x)?[0-9a-fA-F]{128}$/).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress, payoutWalletAddress, authorizationSignature }) => {
+      const payout = payoutWalletAddress ?? walletAddress;
+      if (authorizationSignature === undefined) {
+        const payload = platformClient.referrals.claimAuthorizationPayload(payout);
+        return toolResult({
+          wallet_address: walletAddress,
+          payout_wallet_address: payout,
+          authorization_payload_base64: Buffer.from(payload).toString("base64"),
+        }, "Have the claiming wallet sign this payload externally, then call again with its hex signature.");
+      }
+      const response: PlatformReferralClaimResponse = await platformClient.referrals.claim({
+        walletAddress,
+        payoutWalletAddress: payout,
+        authorizationSignature,
+      });
+      return toolResult(response, `${response.claimable_atoms} referral reward atoms requested.`);
+    },
+  );
+
+  server.registerTool(
+    "strata_bugs",
+    {
+      title: "Strata bug reports",
+      description: "Read an owner's redacted bug reports and confirmed points.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress }) => {
+      const response = await platformClient.bugs.read(walletAddress);
+      return toolResult(response, `${response.reports.length} redacted bug reports returned.`);
+    },
+  );
+
+  server.registerTool(
+    "strata_bug_submit",
+    {
+      title: "Submit Strata bug report",
+      description:
+        "Prepare or submit a bug report. Omit authorizationSignature to receive the exact "
+        + "payload for the owner wallet to sign externally; provide that hex signature to submit.",
+      inputSchema: {
+        ownerWallet: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        message: z.string().trim().min(1).max(2_000),
+        authorizationSignature: z.string().regex(/^(?:0x)?[0-9a-fA-F]{128}$/).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ ownerWallet, message, authorizationSignature }) => {
+      if (authorizationSignature === undefined) {
+        const payload = platformClient.bugs.authorizationPayload(message);
+        return toolResult({
+          owner_wallet: ownerWallet,
+          authorization_payload_base64: Buffer.from(payload).toString("base64"),
+        }, "Sign this payload externally, then call strata_bug_submit again with the hex signature.");
+      }
+      const response = await platformClient.bugs.submit({
+        ownerWallet,
+        message,
+        authorizationSignature,
+      });
+      return toolResult(response, `Bug report ${response.bug_id} is pending review.`);
+    },
+  );
+
   const markets = server.registerTool(
     "strata_markets",
     {
@@ -238,13 +1468,25 @@ export async function createStrataMcpServer(
     async ({ includePaused }) =>
       guardedTool(client, "markets.read", async () => {
         const response = await client.markets();
-        const output: MarketsResponse = includePaused
-          ? response
-          : {
-              ...response,
-              markets: response.markets.filter((market) => market.ready),
-            };
-        return toolResult(output, `${output.markets.length} Strata markets available.`);
+        const visible = includePaused
+          ? response.markets
+          : response.markets.filter((market) => market.ready);
+        const identities = await platformMarketIdentities(platformClient);
+        const output: MarketsToolResponse = {
+          ...response,
+          markets: visible.map((market) => {
+            const identity = identities.get(market.label);
+            return identity === undefined ? market : { ...market, ...identity };
+          }),
+        };
+        const identified = output.markets.filter((market) => "market_id" in market).length;
+        return toolResult(
+          output,
+          `${output.markets.length} Strata markets available`
+            + (identified > 0
+              ? `; ${identified} carry a market_id — pass it as marketId to every by-market tool.`
+              : "."),
+        );
       }),
   );
 
@@ -267,16 +1509,17 @@ export async function createStrataMcpServer(
           .regex(/^[0-9]+$/)
           .max(20)
           .describe("Exact input amount in the input token's smallest atomic unit."),
-        slippageBps: z
+        maximumToleranceBps: z
           .number()
           .int()
           .min(0)
           .max(1_000)
           .optional()
-          .default(DEFAULT_SLIPPAGE_BPS)
+          .default(DEFAULT_MAXIMUM_TOLERANCE_BPS)
           .describe(
-            "Optional maximum execution tolerance in basis points. "
-            + "The default 0 requires exact quoted output.",
+            "The most you accept below the quoted output, in basis points (default 0: the "
+            + "quoted output exactly). This is YOUR choice. It is not price impact — "
+            + "price_impact_pct in the response is measured from the book and is not a setting.",
           ),
       },
       annotations: {
@@ -286,22 +1529,110 @@ export async function createStrataMcpServer(
         openWorldHint: true,
       },
     },
-    async ({ market, side, amountInAtoms, slippageBps }) =>
+    async ({ market, side, amountInAtoms, maximumToleranceBps }) =>
       guardedTool(client, "quotes.read", async () => {
         const request: QuoteRequest = {
           market,
           side,
           amountInAtoms,
-          slippageBps,
+          maximumToleranceBps,
         };
         const response: QuoteResponse = await client.quote(request);
-        return toolResult(
-          response,
-          `Sonar ${response.side} quote: ${response.amount_in_consumed_atoms} input atoms `
-            + `for ${response.amount_out_atoms} user-net output atoms; user-net minimum `
-            + `${response.minimum_output_atoms}; expires at ${response.expires_at_ms}.`,
-        );
+        return toolResult(response, quoteSummary(response));
       }),
+  );
+
+  const exactOutputQuote = server.registerTool(
+    "strata_exact_output_quote",
+    {
+      title: "Sonar exact-output quote",
+      description:
+        "Request a short-lived Sonar quote for an exact output amount (for example: buy "
+        + "1 SOL). Strata inverts its best route and returns the input that delivers it as "
+        + "amount_in_atoms; minimum_output_atoms is the requested amount lowered by the "
+        + "optional maximumToleranceBps (default 0: exactly the requested amount or the "
+        + "execution fails closed). Execute it with the same quote_id flow as strata_quote.",
+      inputSchema: {
+        market: z
+          .string()
+          .min(1)
+          .max(128)
+          .describe("Market label such as SOL/USDC, or its public market ID."),
+        side: z.enum(["buy", "sell"]).describe("Buy or sell the market's base asset."),
+        amountOutAtoms: z
+          .string()
+          .regex(/^[0-9]+$/)
+          .max(20)
+          .describe(
+            "Output amount to receive at least, in the output token's smallest atomic unit "
+            + "(base atoms for a buy, quote atoms for a sell).",
+          ),
+        maximumToleranceBps: z
+          .number()
+          .int()
+          .min(0)
+          .max(1_000)
+          .optional()
+          .default(DEFAULT_MAXIMUM_TOLERANCE_BPS)
+          .describe(
+            "The most you accept below the quoted output, in basis points (default 0: the "
+            + "quoted output exactly). This is YOUR choice. It is not price impact — "
+            + "price_impact_pct in the response is measured from the book and is not a setting.",
+          ),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ market, side, amountOutAtoms, maximumToleranceBps }) =>
+      guardedTool(client, "quotes.read", async () => {
+        const request: QuoteRequest = {
+          market,
+          side,
+          amountOutAtoms,
+          maximumToleranceBps,
+        };
+        const response: QuoteResponse = await client.quote(request);
+        return toolResult(response, quoteSummary(response));
+      }),
+  );
+
+  server.registerTool(
+    "strata_swap_quote",
+    {
+      title: "Sonar asset swap quote",
+      description:
+        "Request short-lived exact-input customer economics between two opaque Strata asset IDs.",
+      inputSchema: {
+        inputAssetId: z.string().regex(/^asset_[0-9a-f]{32}$/),
+        outputAssetId: z.string().regex(/^asset_[0-9a-f]{32}$/),
+        amountInAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20),
+        maximumToleranceBps: z.number().int().min(0).max(1_000).optional().default(0),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ inputAssetId, outputAssetId, amountInAtoms, maximumToleranceBps }) => {
+      const response: PlatformSwapQuoteResponse = await platformClient.quotes.swap({
+        inputAssetId,
+        outputAssetId,
+        amountInAtoms,
+        maximumToleranceBps,
+      });
+      return toolResult(
+        response,
+        `Sonar swap quote: ${response.amount_in_consumed_atoms} input atoms for `
+          + `${response.amount_out_atoms} user-net output atoms; minimum `
+          + `${response.minimum_output_atoms}; expires at ${response.expires_at_ms}.`,
+      );
+    },
   );
 
   const executionChallenge = server.registerTool(
@@ -323,7 +1654,10 @@ export async function createStrataMcpServer(
           .string()
           .regex(/^[0-9]+$/)
           .max(20)
-          .describe("Current Vault account sequence as an unsigned decimal string."),
+          .optional()
+          .describe(
+            "Optional Vault market account sequence as an unsigned decimal string. Omit it and Strata resolves the next sequence from the Vault's confirmed market account.",
+          ),
       },
       annotations: {
         readOnlyHint: false,
@@ -339,7 +1673,7 @@ export async function createStrataMcpServer(
           quoteId,
           ownerWallet,
           sessionPublicKey,
-          accountSequence,
+          ...(accountSequence === undefined ? {} : { accountSequence }),
         };
         const response = await client.executionChallenge(request);
         return toolResult(
@@ -354,19 +1688,25 @@ export async function createStrataMcpServer(
     {
       title: "Prepare Strata execution",
       description:
-        "Exchange an externally signed authorization challenge for a quote-bound partially signed transaction.",
+        "Prepare a quote-bound partially signed transaction. One signature: pass quoteId + ownerWallet + sessionPublicKey and sign only the returned transaction. (A challengeId + authorizationSignature from strata_execution_challenge is still accepted.)",
       inputSchema: {
         market: z.string().min(1).max(128).describe("Market label or public market ID."),
+        quoteId: z.string().regex(/^sq_[0-9a-f]{32}$/).optional().describe("Unexpired Sonar quote ID (direct, one-signature path)."),
+        ownerWallet: z.string().min(32).max(44).optional(),
+        sessionPublicKey: z.string().min(32).max(44).optional(),
+        accountSequence: z.string().regex(/^[0-9]+$/).max(20).optional(),
         challengeId: z
           .string()
           .regex(/^sc_[0-9a-f]{32}$/)
-          .describe("Execution challenge ID returned by Strata."),
+          .optional()
+          .describe("Execution challenge ID returned by Strata (two-step path)."),
         authorizationSignature: z
           .string()
           .min(1)
           .max(128)
           .regex(/^[1-9A-HJ-NP-Za-km-z]+$/)
-          .describe("Base58 Ed25519 signature made externally over the challenge payload."),
+          .optional()
+          .describe("Base58 Ed25519 signature made externally over the challenge payload (two-step path)."),
       },
       annotations: {
         readOnlyHint: false,
@@ -375,17 +1715,30 @@ export async function createStrataMcpServer(
         openWorldHint: true,
       },
     },
-    async ({ market, challengeId, authorizationSignature }) =>
+    async ({ market, quoteId, ownerWallet, sessionPublicKey, accountSequence, challengeId, authorizationSignature }) =>
       guardedTool(client, "trade.prepare", async () => {
-        const request: ExecutionPrepareRequest = {
-          market,
-          challengeId,
-          authorizationSignature,
-        };
+        let request: ExecutionPrepareRequest;
+        if (challengeId !== undefined || authorizationSignature !== undefined) {
+          if (challengeId === undefined || authorizationSignature === undefined) {
+            return toolError("invalid_request", "The two-step path needs both challengeId and authorizationSignature.", false);
+          }
+          request = { market, challengeId, authorizationSignature };
+        } else {
+          if (quoteId === undefined || ownerWallet === undefined || sessionPublicKey === undefined) {
+            return toolError("invalid_request", "Pass quoteId, ownerWallet, and sessionPublicKey (or a signed challenge).", false);
+          }
+          request = {
+            market,
+            quoteId,
+            ownerWallet,
+            sessionPublicKey,
+            ...(accountSequence === undefined ? {} : { accountSequence }),
+          };
+        }
         const response = await client.executionPrepare(request);
         return toolResult(
           response,
-          `Prepared execution ${response.execution_id}; externally verify and sign before ${response.expires_at_ms}.`,
+          `Prepared execution ${response.execution_id}; verify it, then sign the transaction externally with the session key before ${response.expires_at_ms} and submit.`,
         );
       }),
   );
@@ -449,7 +1802,14 @@ export async function createStrataMcpServer(
         action: z.enum(["place", "cancel", "cancel_all", "replace", "batch"]),
         ownerWallet: z.string().min(32).max(44),
         sessionPublicKey: z.string().min(32).max(44),
-        accountSequence: z.string().regex(/^[0-9]+$/).max(20).optional(),
+        accountSequence: z
+          .string()
+          .regex(/^[0-9]+$/)
+          .max(20)
+          .optional()
+          .describe(
+            "Optional Vault market account sequence. Omit it and Strata resolves the next sequence from the Vault's confirmed market account.",
+          ),
         clientOrderId: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
         side: z.enum(["buy", "sell"]).optional(),
         orderType: z.enum(["good_until_cancelled", "post_only"]).optional(),
@@ -475,124 +1835,9 @@ export async function createStrataMcpServer(
       },
     },
     async (args) => guardedTool(client, "orders.prepare", async () => {
-      let request: PlatformOrderChallengeInput;
-      if (args.action === "place") {
-        if (
-          args.accountSequence === undefined
-          || args.clientOrderId === undefined
-          || args.side === undefined
-          || args.orderType === undefined
-          || args.limitPriceAtoms === undefined
-          || args.sizeAtoms === undefined
-        ) {
-          return toolError(
-            "invalid_request",
-            "Place requires accountSequence, clientOrderId, side, orderType, limitPriceAtoms, and sizeAtoms.",
-            false,
-          );
-        }
-        request = {
-          action: "place",
-          ownerWallet: args.ownerWallet,
-          sessionPublicKey: args.sessionPublicKey,
-          accountSequence: args.accountSequence,
-          clientOrderId: args.clientOrderId,
-          side: args.side,
-          orderType: args.orderType,
-          limitPriceAtoms: args.limitPriceAtoms,
-          sizeAtoms: args.sizeAtoms,
-        };
-      } else if (args.action === "cancel") {
-        if (args.orderId === undefined) {
-          return toolError("invalid_request", "Cancel requires orderId.", false);
-        }
-        request = {
-          action: "cancel",
-          ownerWallet: args.ownerWallet,
-          sessionPublicKey: args.sessionPublicKey,
-          orderId: args.orderId,
-        };
-      } else if (args.action === "cancel_all") {
-        request = {
-          action: "cancel_all",
-          ownerWallet: args.ownerWallet,
-          sessionPublicKey: args.sessionPublicKey,
-        };
-      } else if (args.action === "replace") {
-        if (
-          args.orderId === undefined
-          || args.accountSequence === undefined
-          || args.clientOrderId === undefined
-          || args.side === undefined
-          || args.orderType === undefined
-          || args.limitPriceAtoms === undefined
-          || args.sizeAtoms === undefined
-        ) {
-          return toolError(
-            "invalid_request",
-            "Replace requires orderId, accountSequence, clientOrderId, side, orderType, limitPriceAtoms, and sizeAtoms.",
-            false,
-          );
-        }
-        request = {
-          action: "replace",
-          ownerWallet: args.ownerWallet,
-          sessionPublicKey: args.sessionPublicKey,
-          orderId: args.orderId,
-          accountSequence: args.accountSequence,
-          clientOrderId: args.clientOrderId,
-          side: args.side,
-          orderType: args.orderType,
-          limitPriceAtoms: args.limitPriceAtoms,
-          sizeAtoms: args.sizeAtoms,
-        };
-      } else {
-        if (args.operations === undefined) {
-          return toolError("invalid_request", "Batch requires operations.", false);
-        }
-        const operations: PlatformOrderBatchOperation[] = [];
-        for (const operation of args.operations) {
-          if (operation.action === "cancel") {
-            if (operation.orderId === undefined) {
-              return toolError("invalid_request", "Batch cancel requires orderId.", false);
-            }
-            operations.push({ action: "cancel", orderId: operation.orderId });
-            continue;
-          }
-          if (
-            operation.accountSequence === undefined
-            || operation.clientOrderId === undefined
-            || operation.side === undefined
-            || operation.orderType === undefined
-            || operation.limitPriceAtoms === undefined
-            || operation.sizeAtoms === undefined
-            || (operation.action === "replace" && operation.orderId === undefined)
-          ) {
-            return toolError(
-              "invalid_request",
-              `Batch ${operation.action} has incomplete fields.`,
-              false,
-            );
-          }
-          const place = {
-            accountSequence: operation.accountSequence,
-            clientOrderId: operation.clientOrderId,
-            side: operation.side,
-            orderType: operation.orderType,
-            limitPriceAtoms: operation.limitPriceAtoms,
-            sizeAtoms: operation.sizeAtoms,
-          };
-          operations.push(operation.action === "replace"
-            ? { action: "replace", orderId: operation.orderId!, ...place }
-            : { action: "place", ...place });
-        }
-        request = {
-          action: "batch",
-          ownerWallet: args.ownerWallet,
-          sessionPublicKey: args.sessionPublicKey,
-          operations,
-        };
-      }
+      const mapped = orderOperationFromArgs(args);
+      if ("content" in mapped) return mapped;
+      const request = mapped;
       const response = await platformClient.orders.challenge(args.marketId, request);
       return toolResult(
         response,
@@ -606,15 +1851,36 @@ export async function createStrataMcpServer(
     {
       title: "Prepare Strata order control",
       description:
-        "Exchange an externally signed order challenge for an immutable partially signed transaction.",
+        "Prepare an immutable partially signed order-control transaction. One signature: pass the operation itself (same fields as strata_order_challenge) and sign only the returned transaction with the session key. (A challengeId + authorizationSignature from strata_order_challenge is still accepted.)",
       inputSchema: {
         marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
-        challengeId: z.string().regex(/^oc_[0-9a-f]{32}$/),
+        challengeId: z.string().regex(/^oc_[0-9a-f]{32}$/).optional(),
         authorizationSignature: z
           .string()
           .min(64)
           .max(88)
-          .regex(/^[1-9A-HJ-NP-Za-km-z]+$/),
+          .regex(/^[1-9A-HJ-NP-Za-km-z]+$/)
+          .optional(),
+        action: z.enum(["place", "cancel", "cancel_all", "replace", "batch"]).optional(),
+        ownerWallet: z.string().min(32).max(44).optional(),
+        sessionPublicKey: z.string().min(32).max(44).optional(),
+        accountSequence: z.string().regex(/^[0-9]+$/).max(20).optional(),
+        clientOrderId: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
+        side: z.enum(["buy", "sell"]).optional(),
+        orderType: z.enum(["good_until_cancelled", "post_only"]).optional(),
+        limitPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        sizeAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        orderId: z.string().regex(/^order_[0-9a-f]{32}$/).optional(),
+        operations: z.array(z.object({
+          action: z.enum(["place", "cancel", "replace"]),
+          accountSequence: z.string().regex(/^[0-9]+$/).max(20).optional(),
+          clientOrderId: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
+          side: z.enum(["buy", "sell"]).optional(),
+          orderType: z.enum(["good_until_cancelled", "post_only"]).optional(),
+          limitPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+          sizeAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+          orderId: z.string().regex(/^order_[0-9a-f]{32}$/).optional(),
+        }).strict()).min(1).max(6).optional(),
       },
       annotations: {
         readOnlyHint: false,
@@ -623,15 +1889,35 @@ export async function createStrataMcpServer(
         openWorldHint: true,
       },
     },
-    async ({ marketId, challengeId, authorizationSignature }) =>
+    async (args) =>
       guardedTool(client, "orders.prepare", async () => {
-        const response = await platformClient.orders.prepare(marketId, {
-          challengeId,
-          authorizationSignature,
+        if (args.challengeId !== undefined || args.authorizationSignature !== undefined) {
+          if (args.challengeId === undefined || args.authorizationSignature === undefined) {
+            return toolError("invalid_request", "The two-step path needs both challengeId and authorizationSignature.", false);
+          }
+          const response = await platformClient.orders.prepare(args.marketId, {
+            challengeId: args.challengeId,
+            authorizationSignature: args.authorizationSignature,
+          });
+          return toolResult(
+            response,
+            `Prepared ${response.action} control ${response.order_control_id}; externally verify and sign before ${response.expires_at_ms}.`,
+          );
+        }
+        if (args.action === undefined || args.ownerWallet === undefined || args.sessionPublicKey === undefined) {
+          return toolError("invalid_request", "Pass action, ownerWallet, and sessionPublicKey (or a signed challenge).", false);
+        }
+        const mapped = orderOperationFromArgs({
+          ...args,
+          action: args.action,
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
         });
+        if ("content" in mapped) return mapped;
+        const response = await platformClient.orders.prepare(args.marketId, { operation: mapped });
         return toolResult(
           response,
-          `Prepared ${response.action} control ${response.order_control_id}; externally verify and sign before ${response.expires_at_ms}.`,
+          `Prepared ${response.action} control ${response.order_control_id} — one signature: verify it, sign the transaction externally with the session key before ${response.expires_at_ms}, then submit.`,
         );
       }),
   );
@@ -703,9 +1989,14 @@ export async function createStrataMcpServer(
       }),
   );
 
+  registerAutonomyTools(server, client, platformClient, options.sessionAutonomy, () =>
+    typeof Date !== "undefined" ? Date.now() : 0,
+  );
+
   const handles: ToolHandles = {
     markets,
     quote,
+    exactOutputQuote,
     executionChallenge,
     executionPrepare,
     executionSubmit,
@@ -738,9 +2029,315 @@ export async function createStrataMcpServer(
   };
 }
 
+function registerAutonomyTools(
+  server: McpServer,
+  client: StrataClient,
+  platformClient: StrataPlatformClient,
+  autonomy: SessionAutonomy | undefined,
+  nowMs: () => number,
+): void {
+  // Always present, always read-only: the agent may show the slider and offer
+  // to change it, but nothing it calls can raise its own autonomy.
+  server.registerTool(
+    "strata_autonomy",
+    {
+      title: "Strata session autonomy",
+      description:
+        "Read how much this MCP may finish by itself: the autonomy level (ask / limits / instant), "
+        + "any USD ceilings, and how to change it. Read-only — the level is the user's, set out-of-band "
+        + "(the Agents page or the MCP's own env), never by an agent.",
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      const howToChange = {
+        level_env: "STRATA_AUTONOMY = ask | limits | instant",
+        per_trade_env: "STRATA_AUTONOMY_MAX_USD_PER_TRADE",
+        per_day_env: "STRATA_AUTONOMY_MAX_USD_PER_DAY",
+        markets_env: "STRATA_AUTONOMY_MARKETS (comma-separated opaque market IDs)",
+        session_env: "STRATA_SESSION_SECRET_KEY + STRATA_OWNER_WALLET (register the key on the Agents page)",
+        agents_page: "https://stratabook.app/agents",
+        note: "Only the user changes these; an agent can offer but never raise its own level.",
+      };
+      if (!autonomy) {
+        return toolResult(
+          { session_configured: false, level: "ask", how_to_change: howToChange },
+          "Autonomy: ask (no session key configured). I can prepare trades for you to sign, "
+            + "but I cannot sign any myself. To let me trade unattended, register a Vault session "
+            + "key on the Agents page and set STRATA_SESSION_SECRET_KEY (+ STRATA_OWNER_WALLET), "
+            + "then choose STRATA_AUTONOMY=limits or instant.",
+        );
+      }
+      const { config } = autonomy;
+      const spentToday = autonomy.dailyBudget.spentToday(nowMs());
+      const state = {
+        session_configured: true,
+        wallet_address: autonomy.ownerWallet,
+        session_public_key: autonomy.signer.publicKey,
+        level: config.level,
+        max_usd_per_trade: config.maxUsdPerTrade ?? null,
+        max_usd_per_day: config.maxUsdPerDay ?? null,
+        spent_today_usd: Number(spentToday.toFixed(2)),
+        remaining_today_usd:
+          config.maxUsdPerDay === undefined
+            ? null
+            : Number(Math.max(0, config.maxUsdPerDay - spentToday).toFixed(2)),
+        allowed_market_ids: config.allowedMarketIds ?? null,
+        how_to_change: howToChange,
+      };
+      const summary =
+        config.level === "instant"
+          ? "Autonomy: instant — I trade within your on-chain session caps without asking."
+          : config.level === "limits"
+            ? `Autonomy: limits — I trade instantly up to ${config.maxUsdPerTrade !== undefined ? "$" + config.maxUsdPerTrade + "/trade" : "no per-trade cap"}`
+              + `${config.maxUsdPerDay !== undefined ? ", $" + config.maxUsdPerDay + "/day" : ""}; above that I stop and ask.`
+            : "Autonomy: ask — I prepare trades but never sign them; you sign each one.";
+      return toolResult(state, summary);
+    },
+  );
+
+  if (!autonomy) return;
+
+  const resolver = new MarketMetaResolver(
+    platformClient,
+    async () => (await client.markets()).markets,
+    nowMs,
+  );
+  const markFor = async (marketId: string) => {
+    const mark = await platformClient.marketData.mark(marketId);
+    return {
+      price_atoms_per_base_unit: mark.price_atoms_per_base_unit,
+      quote_decimals: mark.quote_decimals,
+      stale: mark.stale,
+    };
+  };
+  const refuse = (reason: string, prepared: unknown, summary: string) =>
+    toolResult({ executed: false, reason, prepared }, summary);
+
+  // ── one-shot immediate execution from a fresh Sonar quote ─────────────────
+  server.registerTool(
+    "strata_execute_quote",
+    {
+      title: "Execute a Strata quote",
+      description:
+        "Take a fresh Sonar quote and, within the autonomy slider, sign it with the session key and "
+        + "submit it in one call. Under \"ask\" (or over a \"limits\" ceiling) it does not sign — it returns "
+        + "the quote and asks you to sign or raise the slider.",
+      inputSchema: {
+        market: z.string().min(2).max(64).describe("Market label such as SOL/USDC, or its public market ID."),
+        side: z.enum(["buy", "sell"]),
+        amountInAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20),
+        toleranceBps: z.number().int().min(0).max(1_000).optional(),
+        idempotencyKey: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (args) =>
+      guardedTool(client, "trade.submit", async () => {
+        const quote: QuoteResponse = await client.quote({
+          market: args.market,
+          side: args.side,
+          amountInAtoms: args.amountInAtoms,
+          ...(args.toleranceBps === undefined ? {} : { toleranceBps: args.toleranceBps }),
+        });
+        const sonar = (await client.markets()).markets.find(
+          (market) => market.market_pda === quote.market_id,
+        );
+        const notional = sonar
+          ? quoteNotionalUsd(
+              quote.side,
+              quote.amount_in_atoms,
+              quote.minimum_output_atoms,
+              sonar.quote_decimals,
+            )
+          : null;
+        const marketId = sonar ? await resolver.idForLabel(sonar.label) : null;
+        const decision = decideAutonomy(autonomy, marketId ?? "", notional, nowMs());
+        if (!decision.allow) {
+          return refuse(decision.reason, quote, decision.reason);
+        }
+        const receipt = await client.executeQuote({
+          quote,
+          ownerWallet: autonomy.ownerWallet,
+          signer: autonomy.signer,
+          ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
+        });
+        if (notional !== null) autonomy.dailyBudget.record(notional, nowMs());
+        return toolResult(
+          { executed: true, receipt, notional_usd: notional },
+          `Executed ${quote.side} on ${quote.market_id} as ${receipt.signature}.`,
+        );
+      }),
+  );
+
+  // ── one-shot order control (place / cancel / replace / batch) ─────────────
+  server.registerTool(
+    "strata_order_execute",
+    {
+      title: "Execute a Strata order control",
+      description:
+        "Place, cancel, replace, or batch orders and, within the autonomy slider, sign with the session "
+        + "key and submit in one call. Owner wallet and session key come from the configured session. "
+        + "Under \"ask\" (or over a \"limits\" ceiling) it prepares the transaction and asks you to sign.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        action: z.enum(["place", "cancel", "cancel_all", "replace", "batch"]),
+        clientOrderId: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
+        side: z.enum(["buy", "sell"]).optional(),
+        orderType: z.enum(["good_until_cancelled", "post_only"]).optional(),
+        limitPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        sizeAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        orderId: z.string().regex(/^order_[0-9a-f]{32}$/).optional(),
+        operations: z.array(z.object({
+          action: z.enum(["place", "cancel", "replace"]),
+          clientOrderId: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
+          side: z.enum(["buy", "sell"]).optional(),
+          orderType: z.enum(["good_until_cancelled", "post_only"]).optional(),
+          limitPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+          sizeAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+          orderId: z.string().regex(/^order_[0-9a-f]{32}$/).optional(),
+        }).strict()).min(1).max(6).optional(),
+        idempotencyKey: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (args) =>
+      guardedTool(client, "orders.submit", async () => {
+        const challenge = orderOperationFromArgs({
+          ...args,
+          ownerWallet: autonomy.ownerWallet,
+          sessionPublicKey: autonomy.signer.publicKey,
+        });
+        if ("content" in challenge) return challenge;
+        // A place/replace risks new base; a cancel reduces it (notional 0).
+        const baseAtoms =
+          (args.action === "place" || args.action === "replace") && args.sizeAtoms !== undefined
+            ? BigInt(args.sizeAtoms)
+            : 0n;
+        const notional = await estimateBaseNotionalUsd(resolver, markFor, args.marketId, baseAtoms);
+        const decision = decideAutonomy(autonomy, args.marketId, notional, nowMs());
+        if (!decision.allow) {
+          const prepared = await platformClient.orders.prepare(args.marketId, {
+            operation: challenge,
+          });
+          return refuse(decision.reason, prepared, decision.reason);
+        }
+        const { sessionPublicKey: _session, ...operation } = challenge;
+        const receipt = await platformClient.orders.execute(args.marketId, {
+          operation: operation as PlatformOrderExecuteOperation,
+          signer: autonomy.signer,
+          ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
+        });
+        if (notional !== null) autonomy.dailyBudget.record(notional, nowMs());
+        return toolResult(
+          { executed: true, receipt, notional_usd: notional },
+          `Executed ${receipt.action} control ${receipt.order_control_id} as ${receipt.signature}.`,
+        );
+      }),
+  );
+
+  // ── one-shot TWAP (schedule / cancel) ─────────────────────────────────────
+  server.registerTool(
+    "strata_twap_execute",
+    {
+      title: "Execute a Strata TWAP",
+      description:
+        "Schedule or cancel a TWAP and, within the autonomy slider, sign with the session key and submit "
+        + "in one call. Owner wallet and session key come from the configured session. Under \"ask\" (or over "
+        + "a \"limits\" ceiling) it prepares the transaction and asks you to sign.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        action: z.enum(["place", "cancel"]),
+        side: z.enum(["buy", "sell"]).optional(),
+        totalSizeAtoms: z.string().regex(/^[1-9][0-9]*$/).optional(),
+        slicesTotal: z.number().int().min(2).max(120).optional(),
+        maximumToleranceBps: z.number().int().min(1).max(1_000).optional(),
+        intervalSlots: z.number().int().min(25).max(4_500).optional(),
+        limitPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).optional(),
+        twapId: z.string().regex(/^twap_[0-9a-f]{32}$/).optional(),
+        idempotencyKey: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (args) =>
+      guardedTool(client, "algos.submit", async () => {
+        let operation: PlatformTwapExecuteOperation;
+        if (args.action === "cancel") {
+          if (args.twapId === undefined) return toolError("invalid_request", "Cancel requires twapId.", false);
+          operation = { action: "cancel", ownerWallet: autonomy.ownerWallet, twapId: args.twapId };
+        } else {
+          if (
+            args.side === undefined
+            || args.totalSizeAtoms === undefined
+            || args.slicesTotal === undefined
+            || args.maximumToleranceBps === undefined
+            || args.intervalSlots === undefined
+            || args.limitPriceAtoms === undefined
+          ) {
+            return toolError("invalid_request", "Place requires side, totalSizeAtoms, slicesTotal, maximumToleranceBps, intervalSlots, and limitPriceAtoms.", false);
+          }
+          operation = {
+            action: "place",
+            ownerWallet: autonomy.ownerWallet,
+            side: args.side,
+            totalSizeAtoms: args.totalSizeAtoms,
+            slicesTotal: args.slicesTotal,
+            maximumToleranceBps: args.maximumToleranceBps,
+            intervalSlots: args.intervalSlots,
+            limitPriceAtoms: args.limitPriceAtoms,
+          };
+        }
+        const baseAtoms =
+          args.action === "place" && args.totalSizeAtoms !== undefined ? BigInt(args.totalSizeAtoms) : 0n;
+        const notional = await estimateBaseNotionalUsd(resolver, markFor, args.marketId, baseAtoms);
+        const decision = decideAutonomy(autonomy, args.marketId, notional, nowMs());
+        if (!decision.allow) {
+          const prepared = await platformClient.algos.prepare(args.marketId, {
+            operation: {
+              ...operation,
+              sessionPublicKey: autonomy.signer.publicKey,
+            } as PlatformTwapChallengeInput,
+          });
+          return refuse(decision.reason, prepared, decision.reason);
+        }
+        const receipt = await platformClient.algos.execute(args.marketId, {
+          operation,
+          signer: autonomy.signer,
+          ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
+        });
+        if (notional !== null) autonomy.dailyBudget.record(notional, nowMs());
+        return toolResult(
+          { executed: true, receipt, notional_usd: notional },
+          `Executed TWAP ${receipt.twap_control_id} as ${receipt.signature}.`,
+        );
+      }),
+  );
+}
+
 function applyCapabilityCatalog(handles: ToolHandles, catalog: CapabilityCatalog): void {
   setToolEnabled(handles.markets, capabilityAvailable(catalog, "markets.read"));
   setToolEnabled(handles.quote, capabilityAvailable(catalog, "quotes.read"));
+  setToolEnabled(handles.exactOutputQuote, capabilityAvailable(catalog, "quotes.read"));
   setToolEnabled(handles.executionChallenge, capabilityAvailable(catalog, "trade.prepare"));
   setToolEnabled(handles.executionPrepare, capabilityAvailable(catalog, "trade.prepare"));
   setToolEnabled(handles.executionSubmit, capabilityAvailable(catalog, "trade.submit"));
@@ -776,6 +2373,19 @@ async function guardedTool(
     }
     return toolError("request_failed", safeMessage(error), true);
   }
+}
+
+/**
+ * One line that keeps the two numbers apart: price impact is measured from the
+ * book; the tolerance is the caller's own floor.
+ */
+function quoteSummary(response: QuoteResponse): string {
+  return (
+    `Sonar ${response.side} quote: ${response.amount_in_consumed_atoms} input atoms for `
+    + `${response.amount_out_atoms} user-net output atoms; price impact ${response.price_impact_pct}% `
+    + `(measured from the book); your tolerance ${response.maximum_tolerance_bps} bps, so the `
+    + `user-net floor is ${response.minimum_output_atoms}; expires at ${response.expires_at_ms}.`
+  );
 }
 
 function toolResult(value: unknown, summary: string): CallToolResult {

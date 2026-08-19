@@ -10,6 +10,7 @@ import {
   STRATA_AGENT_HARNESS,
 } from "./generated-harness.js";
 import { createStrataMcpServer, probeStrataMcpReadiness } from "./server.js";
+import { sessionAutonomyFromEnv } from "./autonomy.js";
 import { SERVER_VERSION } from "./version.js";
 
 interface Options {
@@ -18,6 +19,7 @@ interface Options {
   timeoutMs: number;
   host: string;
   port: number;
+  sessionAutonomy?: NonNullable<Awaited<ReturnType<typeof sessionAutonomyFromEnv>>>;
 }
 
 function parse(argv: string[]): Options {
@@ -192,8 +194,16 @@ function safeError(error: unknown): string {
 
 async function main(): Promise<void> {
   const options = parse(process.argv.slice(2));
-  if (options.transport === "stdio") await runStdio(options);
-  else await runHttp(options);
+  const sessionAutonomy = await sessionAutonomyFromEnv(process.env);
+  const withSession: Options = sessionAutonomy ? { ...options, sessionAutonomy } : options;
+  if (sessionAutonomy) {
+    process.stderr.write(
+      `[strata-mcp] session autonomy: ${sessionAutonomy.config.level} `
+        + `(wallet ${sessionAutonomy.ownerWallet.slice(0, 6)}…, session ${sessionAutonomy.signer.publicKey.slice(0, 6)}…)\n`,
+    );
+  }
+  if (withSession.transport === "stdio") await runStdio(withSession);
+  else await runHttp(withSession);
 }
 
 main().catch((error: unknown) => {
