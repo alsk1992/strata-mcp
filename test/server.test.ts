@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -88,6 +91,24 @@ const packageMetadata = require("../../package.json") as { version: string };
 test("server identity follows package metadata", () => {
   assert.equal(SERVER_VERSION, packageMetadata.version);
 });
+
+
+/**
+ * Resolve a public contract fixture in both the monorepo (mcp nested under
+ * sdk/, contract a sibling of the package) and the published mirror (mcp is the
+ * repo root, contract shipped at its root) by walking up from this test file.
+ */
+function contractFixture(relative: string): URL {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let depth = 0; depth < 8; depth += 1) {
+    const candidate = join(dir, "contract", relative);
+    if (existsSync(candidate)) return new URL(`file://${candidate}`);
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(`contract fixture not found: ${relative}`);
+}
 
 function catalog(
   enabled: boolean,
@@ -494,7 +515,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
   let makerStatusRequestedFor: string | undefined;
   let makerReputationRequestedFor: string | undefined;
   const platformMakerReputation = JSON.parse(
-    await readFile(new URL("../../../contract/v2/maker-reputation.json", import.meta.url), "utf8"),
+    await readFile(contractFixture("v2/maker-reputation.json"), "utf8"),
   ) as Record<string, unknown>;
   const platformMakerStatus: PlatformMakerStatusResponse = {
     schema_version: 2,
