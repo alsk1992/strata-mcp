@@ -11,6 +11,8 @@ export const STRATA_AGENT_HARNESS = {
     "capabilities": "https://api.stratabook.app/sonar/capabilities",
     "markets": "https://api.stratabook.app/sonar/markets",
     "platform_capabilities": "https://api.stratabook.app/v2/capabilities",
+    "platform_action_graph": "https://api.stratabook.app/v2/action-graph",
+    "platform_status": "https://api.stratabook.app/v2/status",
     "platform_markets": "https://api.stratabook.app/v2/markets",
     "action_graph": "https://api.stratabook.app/sonar/action-graph",
     "mcp": "https://api.stratabook.app/mcp",
@@ -20,11 +22,42 @@ export const STRATA_AGENT_HARNESS = {
     "mcp_tool_order": [
       "strata_capabilities",
       "strata_action_graph",
+      "strata_platform_graph",
+      "strata_status",
       "strata_markets",
+      "strata_marks",
+      "strata_candles",
+      "strata_twaps",
+      "strata_twap_challenge",
+      "strata_twap_cancel",
+      "strata_twap_prepare",
+      "strata_twap_submit",
+      "strata_portfolio",
+      "strata_portfolio_history",
+      "strata_market_making_status",
+      "strata_market_making_reputation",
+      "strata_vault_status",
+      "strata_vault_setup",
+      "strata_vault_deposit",
+      "strata_vault_withdraw",
+      "strata_vault_delegate",
+      "strata_vault_policy",
+      "strata_vault_pause",
+      "strata_vault_submit",
+      "strata_vault_submission",
+      "strata_rewards",
+      "strata_referrals",
+      "strata_referral_link",
+      "strata_referral_claim",
+      "strata_bugs",
+      "strata_bug_submit",
       "strata_quote",
+      "strata_exact_output_quote",
+      "strata_swap_quote",
       "strata_execution_challenge",
       "strata_execution_prepare",
       "strata_execution_submit",
+      "strata_execution_status",
       "strata_order_challenge",
       "strata_order_prepare",
       "strata_order_submit",
@@ -33,8 +66,37 @@ export const STRATA_AGENT_HARNESS = {
     "terminal": [
       "npx -y @stratabook/sdk capabilities --json",
       "npx -y @stratabook/sdk action-graph --json",
+      "npx -y @stratabook/sdk platform-graph --json",
+      "npx -y @stratabook/sdk platform-status --json",
+      "npx -y @stratabook/sdk mark --market-id MARKET_ID --json",
+      "npx -y @stratabook/sdk candles --market-id MARKET_ID --from-ms FROM_MS --to-ms TO_MS --resolution-seconds 300 --json",
+      "npx -y @stratabook/sdk execution-status --market-id MARKET_ID --execution-id EXECUTION_ID --json",
+      "npx -y @stratabook/sdk twaps --market-id MARKET_ID --wallet WALLET_PUBLIC_KEY --json",
+      "npx -y @stratabook/sdk twap-challenge --market-id MARKET_ID --owner-wallet OWNER_PUBLIC_KEY --session-public-key SESSION_PUBLIC_KEY --side buy --total-size-atoms TOTAL_ATOMS --slices 10 --tolerance-bps 100 --interval-slots 100 --limit-price-atoms PRICE_ATOMS --json",
+      "npx -y @stratabook/sdk twap-cancel --market-id MARKET_ID --owner-wallet OWNER_PUBLIC_KEY --session-public-key SESSION_PUBLIC_KEY --twap-id TWAP_ID --json",
+      "npx -y @stratabook/sdk twap-prepare --market-id MARKET_ID --owner-wallet OWNER_PUBLIC_KEY --session-public-key SESSION_PUBLIC_KEY --side buy --total-size-atoms TOTAL_ATOMS --slices 10 --tolerance-bps 100 --interval-slots 100 --limit-price-atoms PRICE_ATOMS --json",
+      "npx -y @stratabook/sdk twap-submit --market-id MARKET_ID --twap-control-id CONTROL_ID --signed-transaction-base64 TRANSACTION --idempotency-key KEY --json",
+      "npx -y @stratabook/sdk account --wallet WALLET_PUBLIC_KEY --json",
+      "npx -y @stratabook/sdk portfolio-history --wallet WALLET_PUBLIC_KEY --range 24h --json",
+      "npx -y @stratabook/sdk maker-status --market-id MARKET_ID --wallet WALLET_PUBLIC_KEY --json",
+      "npx -y @stratabook/sdk maker-reputation --market-id MARKET_ID --wallet WALLET_PUBLIC_KEY --json",
+      "npx -y @stratabook/sdk vault-status --wallet WALLET_PUBLIC_KEY --session-public-key SESSION_PUBLIC_KEY --json",
+      "npx -y @stratabook/sdk session-keygen --json",
+      "npx -y @stratabook/sdk vault-setup --wallet WALLET_PUBLIC_KEY --session-public-key SESSION_PUBLIC_KEY --json",
+      "npx -y @stratabook/sdk vault-deposit --wallet WALLET_PUBLIC_KEY --market-id MARKET_ID --asset-id ASSET_ID --amount-atoms AMOUNT --session-public-key SESSION_PUBLIC_KEY --json",
+      "npx -y @stratabook/sdk vault-withdraw --wallet WALLET_PUBLIC_KEY --market-id MARKET_ID --asset-id ASSET_ID --destination-wallet DESTINATION_WALLET --amount-atoms AMOUNT --json",
+      "npx -y @stratabook/sdk vault-delegate --wallet WALLET_PUBLIC_KEY --session-public-key SESSION_PUBLIC_KEY --action revoke --json",
+      "npx -y @stratabook/sdk vault-policy --wallet WALLET_PUBLIC_KEY --mode restricted --allowed-wallets DESTINATION_WALLET --json",
+      "npx -y @stratabook/sdk vault-pause --wallet WALLET_PUBLIC_KEY --paused true --json",
+      "npx -y @stratabook/sdk rewards --wallet WALLET_PUBLIC_KEY --json",
+      "npx -y @stratabook/sdk referrals --wallet WALLET_PUBLIC_KEY --json",
+      "npx -y @stratabook/sdk referral-link --wallet WALLET_PUBLIC_KEY --code REFERRAL_CODE --json",
+      "npx -y @stratabook/sdk referral-claim --wallet WALLET_PUBLIC_KEY --json",
+      "npx -y @stratabook/sdk bugs --wallet WALLET_PUBLIC_KEY --json",
+      "npx -y @stratabook/sdk bug-payload --message REPORT_TEXT --json",
       "npx -y @stratabook/sdk markets --json",
       "npx -y @stratabook/sdk quote --market SOL/USDC --side sell --amount-atoms 10000000 --json",
+      "npx -y @stratabook/sdk swap-quote --input-asset-id INPUT_ASSET_ID --output-asset-id OUTPUT_ASSET_ID --amount-atoms 10000000 --json",
       "npx -y @stratabook/sdk order-slo --market-id MARKET_ID --owner-wallet OWNER_PUBLIC_KEY --json"
     ]
   },
@@ -45,15 +107,15 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "establish_mode",
-      "instruction": "Read the action graph and identify which prepare and submit nodes are live. The external agent owner configures its permissions and signer authority; static documentation never enables a Strata operation."
+      "instruction": "Read the compact action graph and the complete platform graph, then identify which operation and workflow nodes are live. The external agent owner configures its permissions and signer authority; static documentation never enables a Strata operation."
     },
     {
       "id": "understand_objective",
-      "instruction": "Resolve the user's market, side, amount, and tolerance. Ask before proceeding when any economically meaningful input is ambiguous."
+      "instruction": "Resolve the user's market or input/output assets, side when applicable, amount, and tolerance. Ask before proceeding when any economically meaningful input is ambiguous."
     },
     {
       "id": "discover_market",
-      "instruction": "List markets, select one marked ready, and use its discovered base and quote decimals. Do not guess market identifiers or token decimals."
+      "instruction": "List catalog assets and markets, select currently available product identities, and use discovered decimals. Do not guess identifiers or token decimals."
     },
     {
       "id": "read_market_data",
@@ -61,19 +123,67 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "read_account",
-      "instruction": "When account.read is live, use the owner-configured signer to authorize the exact wallet, market, request time, and fill limit. Read or stream only the sanitized orders and fills returned by the official SDK, and recover stream gaps from a fresh signed snapshot."
+      "instruction": "Read the whole account with one public call by wallet address (portfolio.read / strata_portfolio / `account.read(wallet)`): balances, positions, open orders, and recent fills across every live market — no signature, no session key, no market selection. Per-market signed account reads and streams (account.read / account.stream) exist only for owners who want a signed, per-market view; never make them a prerequisite for trading."
+    },
+    {
+      "id": "read_portfolio",
+      "instruction": "Before sizing any action, read the account once (portfolio.read): exact per-asset total, available, and locked atoms, per-market positions, open orders, recent fills, and USD totals with the observed slot. Treat null USD totals as an incomplete valuation, never as zero; markets listed in unavailable_market_ids did not report orders and fills for that snapshot; use the typed stored-history operation for past equity."
+    },
+    {
+      "id": "read_vault",
+      "instruction": "Before session-owned execution, read the official Vault status for the owner and external session key. Continue only when the product is active, the session is active, and market_execution_ready is true; treat opaque asset limits and withdrawal access as authoritative."
+    },
+    {
+      "id": "protect_vault",
+      "instruction": "When an owner requests a Vault pause or resume and vault.pause is live, prepare the exact transaction with the official SDK, verify that the wallet and requested state are unchanged, then have the owner-configured signer sign and broadcast it externally. Preparation alone does not change state."
+    },
+    {
+      "id": "onboard_vault",
+      "instruction": "Onboarding is one owner signature, once: register the external session key with vault.setup (only the wallet and the session key are required; one session then trades every market) or simply name the session key on the first vault.deposit, which registers it in the same transaction. Policy fields — expiry, cadence, tolerance, per-asset limits — are optional. Verify every echoed field and the prepared transaction before external owner signing and broadcast; retain the session key only in the owner's signer."
+    },
+    {
+      "id": "fund_vault",
+      "instruction": "When vault.deposit is live, select an asset from the discovered market and use an exact positive atomic amount. Verify the echoed owner, market, asset, and amount plus the prepared transaction before external owner signing and broadcast."
+    },
+    {
+      "id": "withdraw_vault",
+      "instruction": "When vault.withdraw is live, choose an exact market asset, destination-owner wallet, and positive atomic amount. Verify every echoed binding and the prepared transaction before external owner signing and broadcast; the on-chain withdrawal policy remains authoritative."
+    },
+    {
+      "id": "revoke_vault_session",
+      "instruction": "When an owner requests session revocation and vault.delegate.manage is live, bind the exact owner wallet and external session public key. Verify both identities and the destructive revoke action before external owner signing and broadcast; preparation alone does not revoke access."
+    },
+    {
+      "id": "control_vault_withdrawals",
+      "instruction": "When vault.policy.manage is live, use blocked mode with no allowed wallets to freeze withdrawals or restricted mode with one to eight exact destination-owner wallets. Verify the echoed mode and complete wallet list before external owner signing and broadcast."
+    },
+    {
+      "id": "reconcile_maker_status",
+      "instruction": "When mm.status.read is live, read the maker's products by wallet address (public, no signature) before and after any maker action: resting firm orders, the intent budget, live signed quotes, each Strand and Current with its remaining exposure and expiry, oracle health, and armed dead-man guards. Reconcile against what the agent believes it posted; treat missing, expired, or disabled products as not quoting."
+    },
+    {
+      "id": "stream_maker_fills",
+      "instruction": "When mm.fills.stream is live, keep one maker stream open per market through the official SDK by wallet address (public, no signature): start from the maker snapshot, apply only contiguous maker_fill and maker_status events, and recover any gap or reconnect from a fresh snapshot. Reconcile every fill and exposure change against the maker's own state before quoting further."
+    },
+    {
+      "id": "inspect_maker_reputation",
+      "instruction": "When mm.reputation.read is live, read the maker's record by wallet address (public, no signature). Use the tier, reliability counters, tier-progress gates, signed-quote eligibility, and minimum cadence before choosing the maker transport; do not infer hidden counterparties or execution paths."
     },
     {
       "id": "preserve_atoms",
       "instruction": "Represent token amounts as unsigned base-10 atomic strings. Never pass settlement amounts through floating-point arithmetic."
     },
     {
+      "id": "authorize_community_actions",
+      "instruction": "For referral link or claim actions, generate the exact official SDK authorization payload, have the affected owner wallet sign it externally, and submit only the detached signature with the same referral code or payout wallet binding."
+    },
+    {
       "id": "request_quote",
-      "instruction": "Request a fresh Sonar quote with an explicit side, exact input atoms, and execution tolerance supplied by the external agent."
+      "instruction": "Request a fresh Sonar quote using either a selected market and explicit side or selected input/output asset IDs, plus exact input atoms and the execution tolerance supplied by the external agent."
     },
     {
       "id": "validate_quote",
-      "instruction": "Verify the quote binds to the selected market, side, and input. Check labelled fees, minimum output, price impact, server time, and expiry."
+      "instruction": "Verify the quote binds to the selected market and side or the selected input/output assets, plus the exact input and tolerance. Check labelled fees, minimum output, price impact, server time, and expiry."
     },
     {
       "id": "report_result",
@@ -81,7 +191,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "authorize_writes",
-      "instruction": "When prepare and submit are exposed, keep signing external to Strata: request canonical authorization bytes, sign them with the owner-configured signer, verify the prepared transaction preserves the quote or exact opaque order set, then submit the externally signed transaction with idempotency. Resting-order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations. Every incoming resting order selects an explicit self-trade prevention policy; no policy permits a self-fill."
+      "instruction": "When prepare and submit are exposed, keep signing external to Strata and use one signature per action: send the operation itself to prepare (orders, TWAP, quote-bound execution), verify the returned transaction, sign only that transaction with the session key, then submit with idempotency. The SDK's built-in verifier decodes the transaction and requires it to be exactly the requested operation for that market with the session co-signing only delegated instructions and never paying; a stricter owner verifier may replace it. The two-step challenge path (authorization bytes signed first) remains available. Resting-order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations. Every incoming resting order selects an explicit self-trade prevention policy; no policy permits a self-fill."
     },
     {
       "id": "stream_order_commands",
@@ -94,6 +204,14 @@ export const STRATA_AGENT_HARNESS = {
     {
       "id": "certify_order_command_slo",
       "instruction": "Use the official non-trading order-command certification harness before release and on the production schedule. Retain its machine-readable connection count, load, latency percentiles, sequence/error rate, thresholds, and pass/fail result; package support alone is not a latency claim."
+    },
+    {
+      "id": "stream_execution_state",
+      "instruction": "When execution.stream is live, watch every execution handle you prepared through the official SDK's sequenced execution stream instead of polling status: start from its snapshot, apply only contiguous execution_update, execution_expired, and execution_unknown events, recover any gap from a fresh snapshot, and treat an expired or unknown handle as not executed unless a confirmed receipt says otherwise."
+    },
+    {
+      "id": "stream_twap_progress",
+      "instruction": "When algos.twap.stream is live, keep the official SDK's TWAP stream open for the owner wallet across the markets with active schedules: start from the snapshot, apply only contiguous twap_update events, and recover any gap from a fresh snapshot. Report executed size, achieved value, fees, and the terminal receipt from the streamed rows rather than polling."
     },
     {
       "id": "monitor_outcome",
@@ -112,7 +230,7 @@ export const STRATA_AGENT_HARNESS = {
   "safety_rules": [
     "Never request or accept wallet secrets, private keys, seed phrases, session keys, or production credentials in a prompt.",
     "Never call undocumented endpoints or reconstruct private Sonar behavior.",
-    "Never silently widen slippage, refresh changed economics, substitute a market, or retry a non-retryable failure.",
+    "Never silently widen the tolerance, refresh changed economics, substitute a market, or retry a non-retryable failure.",
     "Never select a self-trade policy implicitly, suppress an order-command sequence gap, or disarm a dead-man ticket merely because the client is shutting down.",
     "Treat capability removal, revocation, expiry, and emergency disable as immediate stop signals.",
     "Capability and action-graph availability are authoritative for Strata operations; permission and signer policy remain controlled by the external agent owner."
@@ -673,4 +791,4 @@ export const STRATA_ACTION_GRAPH = {
 
 export const STRATA_ACTION_GRAPH_URI = "strata://action-graph/v1";
 
-export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_markets. Read strata://agent-harness/v1 and strata://action-graph/v1. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve the market, side, exact input atoms, and tolerance before strata_quote. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute or control a resting order: request a challenge, verify its quote or exact opaque order bindings, sign canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. When websocket order transport is live, prefer the official SDK persistent command stream, choose explicit self-trade prevention, keep its durable dead-man guard armed for resting exposure, and distinguish immediate RPC broadcast from pushed terminal chain status. If submission is ambiguous, recover durable status with the same control ID and idempotency key. Order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations. Stop on ambiguity, sequence gaps, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";
+export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_platform_graph, then strata_status, then strata_markets. Read strata://agent-harness/v1, strata://action-graph/v1, and strata://platform-graph/v2. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve a market and side or catalog input/output asset IDs, plus exact input atoms and tolerance, before strata_quote or strata_swap_quote. When portfolio.read is live, read the owner's live Vault portfolio before sizing any action and treat null USD totals as an incomplete valuation, never as zero. When mm.status.read is live, reconcile the owner's own maker products, exposure, and dead-man guards through the authorized status read before and after every maker action, and when mm.fills.stream is live keep the official SDK's authenticated maker stream open to apply contiguous maker fills and exposure changes. When algos.twap.stream is live, follow TWAP progress through the official SDK's sequenced TWAP stream instead of polling, and when execution.stream is live watch prepared execution handles through the sequenced execution stream. Before selecting a maker transport, read the externally authorized owner-scoped maker reputation record and follow its signed-quote eligibility, cadence, and tier-progress fields. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute or control a resting order: request a challenge, verify its quote or exact opaque order bindings, sign canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. When websocket order transport is live, prefer the official SDK persistent command stream, choose explicit self-trade prevention, keep its durable dead-man guard armed for resting exposure, and distinguish immediate RPC broadcast from pushed terminal chain status. If submission is ambiguous, recover durable status with the same control ID and idempotency key. Order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations. Stop on ambiguity, sequence gaps, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";
