@@ -32,6 +32,11 @@ import type {
   PlatformCandlesResponse,
   PlatformExecutionStatusResponse,
   PlatformMakerStatusResponse,
+  PlatformMakerControlPrepareResponse,
+  PlatformMakerControlSubmitInput,
+  PlatformMakerControlSubmitResponse,
+  PlatformMakerCurrentPrepareInput,
+  PlatformMakerStrandPrepareInput,
   PlatformPortfolioHistoryResponse,
   PlatformPortfolioResponse,
   PlatformRewardsResponse,
@@ -249,6 +254,26 @@ test("protocol tool discovery and calls obey the current public policy", async (
         public_sdk: true,
         mcp_exposure: "submit",
       },
+      {
+        id: "mm.strand.manage",
+        introduced_in: "1.1",
+        stability: "beta",
+        required_scope: "mm:write",
+        risk: "submit",
+        default_enabled: true,
+        public_sdk: true,
+        mcp_exposure: "submit",
+      },
+      {
+        id: "mm.current.manage",
+        introduced_in: "1.1",
+        stability: "beta",
+        required_scope: "mm:write",
+        risk: "submit",
+        default_enabled: true,
+        public_sdk: true,
+        mcp_exposure: "submit",
+      },
     ],
   };
   const markets: MarketsResponse = {
@@ -295,6 +320,10 @@ test("protocol tool discovery and calls obey the current public policy", async (
   let orderPrepareRequest: PlatformOrderPrepareInput | undefined;
   let orderSubmitRequest: PlatformOrderSubmitInput | undefined;
   let orderStatusRequest: PlatformOrderStatusInput | undefined;
+  let strandPrepareRequest: PlatformMakerStrandPrepareInput | undefined;
+  let strandSubmitRequest: PlatformMakerControlSubmitInput | undefined;
+  let currentPrepareRequest: PlatformMakerCurrentPrepareInput | undefined;
+  let currentSubmitRequest: PlatformMakerControlSubmitInput | undefined;
   let twapChallengeRequest: PlatformTwapChallengeInput | undefined;
   let twapPrepareRequest: PlatformTwapPrepareInput | undefined;
   let twapSubmitRequest: PlatformTwapSubmitInput | undefined;
@@ -378,6 +407,30 @@ test("protocol tool discovery and calls obey the current public policy", async (
     status: "submitted",
     failure_code: null,
     updated_at_ms: 1_785_420_001_000,
+  };
+  const makerControlPrepared: PlatformMakerControlPrepareResponse = {
+    schema_version: 2,
+    contract_version: "2.0",
+    maker_control_id: "mc_55555555555555555555555555555555",
+    market_id: platformMarketId,
+    maker_wallet: "5Ji61Fbeb22Yntgv1hhHeSSLgdEdZchHeM1Tv1MjGhSL",
+    product: "strand",
+    action: "strand_cancel",
+    transaction_base64: "AQ==",
+    recent_blockhash: "11111111111111111111111111111111",
+    last_valid_block_height: 123,
+    expires_at_ms: 1_785_420_060_000,
+  };
+  const makerControlSubmitted: PlatformMakerControlSubmitResponse = {
+    schema_version: 2,
+    contract_version: "2.0",
+    maker_control_id: makerControlPrepared.maker_control_id,
+    market_id: platformMarketId,
+    maker_wallet: makerControlPrepared.maker_wallet,
+    product: "strand",
+    action: "strand_cancel",
+    signature: submitted.signature,
+    status: "submitted",
   };
   const platformGraph: PlatformActionGraphResponse = {
     schema_version: 2,
@@ -880,6 +933,38 @@ test("protocol tool discovery and calls obey the current public policy", async (
       portfolioHistory: async () => platformPortfolioHistory,
     },
     marketMaking: {
+      strand: {
+        prepare: async (_marketId: string, request: PlatformMakerStrandPrepareInput) => {
+          strandPrepareRequest = request;
+          const action = request.action === "upsert" ? "strand_upsert" as const
+            : request.action === "recenter" ? "strand_recenter" as const
+              : request.action === "set_enabled" ? "strand_set_enabled" as const
+                : "strand_cancel" as const;
+          return { ...makerControlPrepared, product: "strand" as const, action };
+        },
+        submit: async (_marketId: string, request: PlatformMakerControlSubmitInput) => {
+          strandSubmitRequest = request;
+          return makerControlSubmitted;
+        },
+      },
+      current: {
+        prepare: async (_marketId: string, request: PlatformMakerCurrentPrepareInput) => {
+          currentPrepareRequest = request;
+          return {
+            ...makerControlPrepared,
+            product: "current" as const,
+            action: request.action === "upsert" ? "current_upsert" as const : "current_cancel" as const,
+          };
+        },
+        submit: async (_marketId: string, request: PlatformMakerControlSubmitInput) => {
+          currentSubmitRequest = request;
+          return {
+            ...makerControlSubmitted,
+            product: "current" as const,
+            action: "current_cancel" as const,
+          };
+        },
+      },
       status: async (_marketId: string, maker: unknown) => {
         makerStatusRequestedFor = String(maker);
         return platformMakerStatus;
@@ -1020,8 +1105,12 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_execution_prepare",
         "strata_execution_status",
         "strata_execution_submit",
+        "strata_market_making_current_prepare",
+        "strata_market_making_current_submit",
         "strata_market_making_reputation",
         "strata_market_making_status",
+        "strata_market_making_strand_prepare",
+        "strata_market_making_strand_submit",
         "strata_markets",
         "strata_marks",
         "strata_order_challenge",
@@ -1583,6 +1672,50 @@ test("protocol tool discovery and calls obey the current public policy", async (
     assert.equal(orderStatusResult.isError, undefined);
     assert.equal(orderStatusRequest?.orderControlId, orderPrepared.order_control_id);
 
+    const strandPrepareResult = await protocolClient.callTool({
+      name: "strata_market_making_strand_prepare",
+      arguments: {
+        marketId: platformMarketId,
+        action: "cancel",
+        makerWallet: makerControlPrepared.maker_wallet,
+      },
+    });
+    assert.equal(strandPrepareResult.isError, undefined);
+    assert.equal(strandPrepareRequest?.action, "cancel");
+    const strandSubmitResult = await protocolClient.callTool({
+      name: "strata_market_making_strand_submit",
+      arguments: {
+        marketId: platformMarketId,
+        makerControlId: makerControlPrepared.maker_control_id,
+        signedTransactionBase64: "AQ==",
+        idempotencyKey: "strand-cancel-1",
+      },
+    });
+    assert.equal(strandSubmitResult.isError, undefined);
+    assert.equal(strandSubmitRequest?.idempotencyKey, "strand-cancel-1");
+
+    const currentPrepareResult = await protocolClient.callTool({
+      name: "strata_market_making_current_prepare",
+      arguments: {
+        marketId: platformMarketId,
+        action: "cancel",
+        makerWallet: makerControlPrepared.maker_wallet,
+      },
+    });
+    assert.equal(currentPrepareResult.isError, undefined);
+    assert.equal(currentPrepareRequest?.action, "cancel");
+    const currentSubmitResult = await protocolClient.callTool({
+      name: "strata_market_making_current_submit",
+      arguments: {
+        marketId: platformMarketId,
+        makerControlId: makerControlPrepared.maker_control_id,
+        signedTransactionBase64: "AQ==",
+        idempotencyKey: "current-cancel-1",
+      },
+    });
+    assert.equal(currentSubmitResult.isError, undefined);
+    assert.equal(currentSubmitRequest?.idempotencyKey, "current-cancel-1");
+
     const batchResult = await protocolClient.callTool({
       name: "strata_order_challenge",
       arguments: {
@@ -1648,8 +1781,12 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_execution_prepare",
         "strata_execution_status",
         "strata_execution_submit",
+        "strata_market_making_current_prepare",
+        "strata_market_making_current_submit",
         "strata_market_making_reputation",
         "strata_market_making_status",
+        "strata_market_making_strand_prepare",
+        "strata_market_making_strand_submit",
         "strata_markets",
         "strata_marks",
         "strata_order_challenge",

@@ -11,6 +11,8 @@ import {
   type ExecutionSubmitRequest,
   type MarketsResponse,
   type PlatformMarket,
+  type PlatformMakerCurrentPrepareInput,
+  type PlatformMakerStrandPrepareInput,
   type QuoteRequest,
   type QuoteResponse,
   type PlatformOrderChallengeInput,
@@ -81,6 +83,10 @@ type ToolHandles = {
   orderPrepare: RegisteredTool;
   orderSubmit: RegisteredTool;
   orderStatus: RegisteredTool;
+  makerStrandPrepare: RegisteredTool;
+  makerStrandSubmit: RegisteredTool;
+  makerCurrentPrepare: RegisteredTool;
+  makerCurrentSubmit: RegisteredTool;
 };
 
 export function capabilityAvailable(catalog: CapabilityCatalog, id: string): boolean {
@@ -1989,6 +1995,215 @@ export async function createStrataMcpServer(
       }),
   );
 
+  const makerStrandPrepare = server.registerTool(
+    "strata_market_making_strand_prepare",
+    {
+      title: "Prepare Strata Strand control",
+      description:
+        "Build one exact unsigned maker-owned Strand transaction. Verify and sign it externally with the maker wallet, then submit it with the Strand submit tool.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        action: z.enum(["upsert", "recenter", "set_enabled", "cancel"]),
+        makerWallet: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        enabled: z.boolean().optional(),
+        asyncOnly: z.boolean().optional(),
+        syncSpreadTicks: z.number().int().min(0).max(65_535).optional(),
+        midPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        maxExposureBaseLots: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        bidOffsetsTicks: z.array(z.number().int().min(0).max(65_535)).length(16).optional(),
+        askOffsetsTicks: z.array(z.number().int().min(0).max(65_535)).length(16).optional(),
+        bidSizesBaseLots: z.array(z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20)).length(16).optional(),
+        askSizesBaseLots: z.array(z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20)).length(16).optional(),
+        newMidPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        validUntilSlot: z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (args) => guardedTool(client, "mm.strand.manage", async () => {
+      let request: PlatformMakerStrandPrepareInput;
+      if (args.action === "upsert") {
+        if (
+          args.enabled === undefined || args.asyncOnly === undefined
+          || args.syncSpreadTicks === undefined || args.midPriceAtoms === undefined
+          || args.maxExposureBaseLots === undefined || args.bidOffsetsTicks === undefined
+          || args.askOffsetsTicks === undefined || args.bidSizesBaseLots === undefined
+          || args.askSizesBaseLots === undefined || args.validUntilSlot === undefined
+        ) {
+          return toolError("invalid_request", "Strand upsert requires every level, exposure, midpoint, spread, flag, and expiry field.", false);
+        }
+        request = {
+          action: "upsert",
+          makerWallet: args.makerWallet,
+          enabled: args.enabled,
+          asyncOnly: args.asyncOnly,
+          syncSpreadTicks: args.syncSpreadTicks,
+          midPriceAtoms: args.midPriceAtoms,
+          maxExposureBaseLots: args.maxExposureBaseLots,
+          bidOffsetsTicks: args.bidOffsetsTicks,
+          askOffsetsTicks: args.askOffsetsTicks,
+          bidSizesBaseLots: args.bidSizesBaseLots,
+          askSizesBaseLots: args.askSizesBaseLots,
+          validUntilSlot: args.validUntilSlot,
+        };
+      } else if (args.action === "recenter") {
+        if (args.newMidPriceAtoms === undefined || args.validUntilSlot === undefined) {
+          return toolError("invalid_request", "Strand recenter requires newMidPriceAtoms and validUntilSlot.", false);
+        }
+        request = {
+          action: "recenter",
+          makerWallet: args.makerWallet,
+          newMidPriceAtoms: args.newMidPriceAtoms,
+          validUntilSlot: args.validUntilSlot,
+        };
+      } else if (args.action === "set_enabled") {
+        if (args.enabled === undefined) {
+          return toolError("invalid_request", "Strand set_enabled requires enabled.", false);
+        }
+        request = { action: "set_enabled", makerWallet: args.makerWallet, enabled: args.enabled };
+      } else {
+        request = { action: "cancel", makerWallet: args.makerWallet };
+      }
+      const response = await platformClient.marketMaking.strand.prepare(args.marketId, request);
+      return toolResult(
+        response,
+        `Prepared ${response.action} control ${response.maker_control_id}; verify and sign only this transaction with ${response.maker_wallet} before ${response.expires_at_ms}.`,
+      );
+    }),
+  );
+
+  const makerStrandSubmit = server.registerTool(
+    "strata_market_making_strand_submit",
+    {
+      title: "Submit Strata Strand control",
+      description: "Submit the exact externally maker-signed Strand transaction with a stable retry key.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        makerControlId: z.string().regex(/^mc_[0-9a-f]{32}$/),
+        signedTransactionBase64: z.string().min(4).max(4_096).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+        idempotencyKey: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, makerControlId, signedTransactionBase64, idempotencyKey }) =>
+      guardedTool(client, "mm.strand.manage", async () => {
+        const response = await platformClient.marketMaking.strand.submit(marketId, {
+          makerControlId,
+          signedTransactionBase64,
+          idempotencyKey,
+        });
+        return toolResult(response, `Submitted ${response.action} as ${response.signature}.`);
+      }),
+  );
+
+  const makerCurrentPrepare = server.registerTool(
+    "strata_market_making_current_prepare",
+    {
+      title: "Prepare Strata Current control",
+      description:
+        "Build one exact unsigned maker-owned Current transaction. Upsert fails closed until the market has a verified on-chain reference; cancel does not need that reference.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        action: z.enum(["upsert", "cancel"]),
+        makerWallet: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        enabled: z.boolean().optional(),
+        asyncOnly: z.boolean().optional(),
+        halfSpreadBps: z.number().int().min(1).max(65_535).optional(),
+        bandStepBps: z.number().int().min(0).max(65_535).optional(),
+        maxConfidenceBps: z.number().int().min(1).max(100).optional(),
+        maxOracleDeviationBps: z.number().int().min(1).max(500).optional(),
+        maxOracleAgeSeconds: z.number().int().min(0).max(4_294_967_295).optional(),
+        syncSpreadBps: z.number().int().min(0).max(65_535).optional(),
+        maxExposureBaseAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        bidDepthBaseAtoms: z.array(z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20)).length(8).optional(),
+        askDepthBaseAtoms: z.array(z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20)).length(8).optional(),
+        validUntilSlot: z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (args) => guardedTool(client, "mm.current.manage", async () => {
+      let request: PlatformMakerCurrentPrepareInput;
+      if (args.action === "cancel") {
+        request = { action: "cancel", makerWallet: args.makerWallet };
+      } else {
+        if (
+          args.enabled === undefined || args.asyncOnly === undefined
+          || args.halfSpreadBps === undefined || args.bandStepBps === undefined
+          || args.maxConfidenceBps === undefined || args.maxOracleDeviationBps === undefined
+          || args.maxOracleAgeSeconds === undefined || args.syncSpreadBps === undefined
+          || args.maxExposureBaseAtoms === undefined || args.bidDepthBaseAtoms === undefined
+          || args.askDepthBaseAtoms === undefined || args.validUntilSlot === undefined
+        ) {
+          return toolError("invalid_request", "Current upsert requires every depth, exposure, spread, oracle-bound, flag, and expiry field.", false);
+        }
+        request = {
+          action: "upsert",
+          makerWallet: args.makerWallet,
+          enabled: args.enabled,
+          asyncOnly: args.asyncOnly,
+          halfSpreadBps: args.halfSpreadBps,
+          bandStepBps: args.bandStepBps,
+          maxConfidenceBps: args.maxConfidenceBps,
+          maxOracleDeviationBps: args.maxOracleDeviationBps,
+          maxOracleAgeSeconds: args.maxOracleAgeSeconds,
+          syncSpreadBps: args.syncSpreadBps,
+          maxExposureBaseAtoms: args.maxExposureBaseAtoms,
+          bidDepthBaseAtoms: args.bidDepthBaseAtoms,
+          askDepthBaseAtoms: args.askDepthBaseAtoms,
+          validUntilSlot: args.validUntilSlot,
+        };
+      }
+      const response = await platformClient.marketMaking.current.prepare(args.marketId, request);
+      return toolResult(
+        response,
+        `Prepared ${response.action} control ${response.maker_control_id}; verify and sign only this transaction with ${response.maker_wallet} before ${response.expires_at_ms}.`,
+      );
+    }),
+  );
+
+  const makerCurrentSubmit = server.registerTool(
+    "strata_market_making_current_submit",
+    {
+      title: "Submit Strata Current control",
+      description: "Submit the exact externally maker-signed Current transaction with a stable retry key.",
+      inputSchema: {
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        makerControlId: z.string().regex(/^mc_[0-9a-f]{32}$/),
+        signedTransactionBase64: z.string().min(4).max(4_096).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+        idempotencyKey: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, makerControlId, signedTransactionBase64, idempotencyKey }) =>
+      guardedTool(client, "mm.current.manage", async () => {
+        const response = await platformClient.marketMaking.current.submit(marketId, {
+          makerControlId,
+          signedTransactionBase64,
+          idempotencyKey,
+        });
+        return toolResult(response, `Submitted ${response.action} as ${response.signature}.`);
+      }),
+  );
+
   registerAutonomyTools(server, client, platformClient, options.sessionAutonomy, () =>
     typeof Date !== "undefined" ? Date.now() : 0,
   );
@@ -2004,6 +2219,10 @@ export async function createStrataMcpServer(
     orderPrepare,
     orderSubmit,
     orderStatus,
+    makerStrandPrepare,
+    makerStrandSubmit,
+    makerCurrentPrepare,
+    makerCurrentSubmit,
   };
   applyCapabilityCatalog(handles, initialCatalog);
   let closed = false;
@@ -2345,6 +2564,12 @@ function applyCapabilityCatalog(handles: ToolHandles, catalog: CapabilityCatalog
   setToolEnabled(handles.orderPrepare, capabilityAvailable(catalog, "orders.prepare"));
   setToolEnabled(handles.orderSubmit, capabilityAvailable(catalog, "orders.submit"));
   setToolEnabled(handles.orderStatus, capabilityAvailable(catalog, "orders.submit"));
+  const strandEnabled = capabilityAvailable(catalog, "mm.strand.manage");
+  setToolEnabled(handles.makerStrandPrepare, strandEnabled);
+  setToolEnabled(handles.makerStrandSubmit, strandEnabled);
+  const currentEnabled = capabilityAvailable(catalog, "mm.current.manage");
+  setToolEnabled(handles.makerCurrentPrepare, currentEnabled);
+  setToolEnabled(handles.makerCurrentSubmit, currentEnabled);
 }
 
 function setToolEnabled(tool: RegisteredTool, enabled: boolean): void {
