@@ -328,7 +328,7 @@ export const STRATA_ACTION_GRAPH = {
     {
       "id": "read_market_status",
       "kind": "read",
-      "summary": "Read tick size, minimum order size, and current market status.",
+      "summary": "Read tick size, the smallest valid base-atom size, and current market status.",
       "required_capabilities": [
         "books.read"
       ],

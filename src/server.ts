@@ -2000,7 +2000,7 @@ export async function createStrataMcpServer(
     {
       title: "Prepare Strata Strand control",
       description:
-        "Build one exact unsigned maker-owned Strand transaction. Verify and sign it externally with the maker wallet, then submit it with the Strand submit tool.",
+        "Build one exact unsigned maker-owned Strand transaction. Every exposure and level size is expressed in base-asset atoms, never lots or whole tokens. Verify and sign it externally with the maker wallet, then submit it with the Strand submit tool.",
       inputSchema: {
         marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
         action: z.enum(["upsert", "recenter", "set_enabled", "cancel"]),
@@ -2009,11 +2009,11 @@ export async function createStrataMcpServer(
         asyncOnly: z.boolean().optional(),
         syncSpreadTicks: z.number().int().min(0).max(65_535).optional(),
         midPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
-        maxExposureBaseLots: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        maxExposureBaseAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
         bidOffsetsTicks: z.array(z.number().int().min(0).max(65_535)).length(16).optional(),
         askOffsetsTicks: z.array(z.number().int().min(0).max(65_535)).length(16).optional(),
-        bidSizesBaseLots: z.array(z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20)).length(16).optional(),
-        askSizesBaseLots: z.array(z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20)).length(16).optional(),
+        bidSizesBaseAtoms: z.array(z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20)).length(16).optional(),
+        askSizesBaseAtoms: z.array(z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20)).length(16).optional(),
         newMidPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
         validUntilSlot: z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20).optional(),
       },
@@ -2030,9 +2030,9 @@ export async function createStrataMcpServer(
         if (
           args.enabled === undefined || args.asyncOnly === undefined
           || args.syncSpreadTicks === undefined || args.midPriceAtoms === undefined
-          || args.maxExposureBaseLots === undefined || args.bidOffsetsTicks === undefined
-          || args.askOffsetsTicks === undefined || args.bidSizesBaseLots === undefined
-          || args.askSizesBaseLots === undefined || args.validUntilSlot === undefined
+          || args.maxExposureBaseAtoms === undefined || args.bidOffsetsTicks === undefined
+          || args.askOffsetsTicks === undefined || args.bidSizesBaseAtoms === undefined
+          || args.askSizesBaseAtoms === undefined || args.validUntilSlot === undefined
         ) {
           return toolError("invalid_request", "Strand upsert requires every level, exposure, midpoint, spread, flag, and expiry field.", false);
         }
@@ -2043,11 +2043,11 @@ export async function createStrataMcpServer(
           asyncOnly: args.asyncOnly,
           syncSpreadTicks: args.syncSpreadTicks,
           midPriceAtoms: args.midPriceAtoms,
-          maxExposureBaseLots: args.maxExposureBaseLots,
+          maxExposureBaseAtoms: args.maxExposureBaseAtoms,
           bidOffsetsTicks: args.bidOffsetsTicks,
           askOffsetsTicks: args.askOffsetsTicks,
-          bidSizesBaseLots: args.bidSizesBaseLots,
-          askSizesBaseLots: args.askSizesBaseLots,
+          bidSizesBaseAtoms: args.bidSizesBaseAtoms,
+          askSizesBaseAtoms: args.askSizesBaseAtoms,
           validUntilSlot: args.validUntilSlot,
         };
       } else if (args.action === "recenter") {
