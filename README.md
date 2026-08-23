@@ -4,6 +4,11 @@ Official capability-gated MCP access to Strata and Sonar. The server delegates
 to `@stratabook/sdk`: it follows the live capability catalog and contains no
 separate quote or execution logic.
 
+The official hosted endpoint currently exposes market, exact-output, and
+asset-to-asset Sonar quotes, together with quote-bound execution tools.
+Capability gating is a runtime safety check so clients stop if policy changes;
+it does **not** mean quotes are inactive.
+
 ## Local stdio
 
 ```sh
@@ -40,6 +45,8 @@ The tools currently available are:
 - `strata_portfolio_history`
 - `strata_market_making_status`
 - `strata_market_making_reputation`
+- `strata_market_making_strand_prepare`, `strata_market_making_strand_submit`
+- `strata_market_making_current_prepare`, `strata_market_making_current_submit`
 - `strata_vault_status`
 - `strata_vault_setup`, `strata_vault_deposit`, `strata_vault_withdraw`, `strata_vault_delegate`, `strata_vault_policy`, `strata_vault_pause` — prepare owner actions with Strata as sponsored fee payer
 - `strata_vault_submit` — submit the owner-signed preparation; Strata pays and broadcasts
@@ -50,12 +57,12 @@ The tools currently available are:
 - `strata_referral_claim` — prepare externally signable consent or submit the signed claim
 - `strata_bugs`
 - `strata_bug_submit` — prepare externally signable bytes or submit the signed report
-- `strata_markets`, when `markets.read` is enabled for MCP
-- `strata_quote` and `strata_exact_output_quote` (spend X / receive at least Y), when market quotes are enabled for MCP
-- `strata_swap_quote`, when catalog-asset swap quotes are enabled for MCP
-- `strata_execution_challenge`, when `trade.prepare` is enabled for MCP
-- `strata_execution_prepare`, when `trade.prepare` is enabled for MCP
-- `strata_execution_submit`, when `trade.submit` is enabled for MCP
+- `strata_markets`
+- `strata_quote` and `strata_exact_output_quote` — live market quotes (spend X / receive at least Y)
+- `strata_swap_quote` — live catalog-asset swap quotes
+- `strata_execution_challenge`
+- `strata_execution_prepare`
+- `strata_execution_submit`
 - `strata_execution_status` — recover a durable immediate-execution receipt
 - `strata_order_challenge`, when `orders.prepare` is enabled for MCP
 - `strata_order_prepare`, when `orders.prepare` is enabled for MCP
@@ -72,7 +79,8 @@ available as `strata://platform-graph/v2`.
 
 The tool list follows the live public policy. Every call rechecks that policy,
 so a disabled capability stops immediately even if a client cached an older
-tool list.
+tool list. Tool discovery from the connected server remains authoritative for
+self-hosted deployments or any future policy change.
 
 ## Hosted Streamable HTTP
 
