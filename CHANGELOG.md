@@ -3,10 +3,16 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.9
+
+- Correct the maker preparation terminology inherited from the SDK:
+  `transaction_version=0` is browser-safe native Solana v0, not legacy.
+  Runtime behavior is unchanged from 0.2.8.
+
 ## 0.2.8
 
 - Consume `@stratabook/sdk` 0.2.8 so hosted maker quickstarts request
-  legacy-format preparations compatible with external wallets.
+  browser-safe native-v0 preparations compatible with external wallets.
 
 ## 0.2.7
 
