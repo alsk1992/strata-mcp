@@ -3,6 +3,13 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.10
+
+- Consume the matching SDK conformance release. The safe deployment gate now
+  exercises hosted MCP discovery, maker reads, and fresh-request Strand and
+  Current preparations after every activation; funded mode proves the
+  restart-safe prepare/submit path with a real externally signed Current.
+
 ## 0.2.9
 
 - Correct the maker preparation terminology inherited from the SDK:

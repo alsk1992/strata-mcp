@@ -107,6 +107,14 @@ available collateral while a control is live and returns it after the final
 control is disabled, exhausted, expired, or cancelled. Current follows Strata's
 live mark and needs no separate publisher transaction.
 
+The matching TypeScript package ships `strata-maker-conformance`. Its default
+`safe` mode exercises this hosted MCP's discovery, public maker reads, and
+fresh-request Strand and Current preparations without signing or broadcasting.
+The explicitly confirmed `funded` mode signs a Current preparation externally,
+submits it in a separate MCP request, waits for chain-derived state, and stops
+it through the same restart-safe continuation path. Production activation runs
+the safe suite automatically and rolls back the MCP release if it fails.
+
 ## Hosted Streamable HTTP
 
 The managed public endpoint is:
