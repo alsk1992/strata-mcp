@@ -37,6 +37,9 @@ import type {
   PlatformMakerControlSubmitInput,
   PlatformMakerControlSubmitResponse,
   PlatformMakerCurrentPrepareInput,
+  PlatformMakerQuickstartPrepareInput,
+  PlatformMakerQuickstartPrepared,
+  PlatformMakerSubmitPreparedInput,
   PlatformMakerStrandPrepareInput,
   PlatformPortfolioHistoryResponse,
   PlatformPortfolioResponse,
@@ -411,6 +414,8 @@ test("protocol tool discovery and calls obey the current public policy", async (
   let strandSubmitRequest: PlatformMakerControlSubmitInput | undefined;
   let currentPrepareRequest: PlatformMakerCurrentPrepareInput | undefined;
   let currentSubmitRequest: PlatformMakerControlSubmitInput | undefined;
+  let makerQuickstartPrepareRequest: PlatformMakerQuickstartPrepareInput | undefined;
+  let makerQuickstartSubmitRequest: PlatformMakerSubmitPreparedInput | undefined;
   let twapChallengeRequest: PlatformTwapChallengeInput | undefined;
   let twapPrepareRequest: PlatformTwapPrepareInput | undefined;
   let twapSubmitRequest: PlatformTwapSubmitInput | undefined;
@@ -678,6 +683,45 @@ test("protocol tool discovery and calls obey the current public policy", async (
     currents: [],
     dead_man_guards: [],
     active_products: 0,
+  };
+  const makerQuickstartPrepared: PlatformMakerQuickstartPrepared = {
+    market: {
+      market_id: platformMarketId,
+      label: "SOL/USDC",
+      base_asset_id: "asset_f7aaf74f7aada9a787dff38b120db490",
+      quote_asset_id: "asset_d5d994a8b7bd6754169178beb2784cec",
+      status: "active",
+      available_actions: ["quote", "execute_immediate", "place_order", "schedule_twap"],
+    },
+    base_asset: {
+      asset_id: "asset_f7aaf74f7aada9a787dff38b120db490",
+      symbol: "SOL",
+      name: "Solana",
+      decimals: 9,
+      network: "solana",
+    },
+    product: "current",
+    operation: {
+      action: "upsert",
+      makerWallet: makerControlPrepared.maker_wallet,
+      enabled: true,
+      asyncOnly: false,
+      halfSpreadBps: 5,
+      bandStepBps: 5,
+      maxConfidenceBps: 100,
+      maxOracleDeviationBps: 500,
+      maxOracleAgeSeconds: 10,
+      syncSpreadBps: 0,
+      maxExposureBaseAtoms: "10000000",
+      bidDepthBaseAtoms: ["3333334", "3333333", "3333333", "0", "0", "0", "0", "0"],
+      askDepthBaseAtoms: ["3333334", "3333333", "3333333", "0", "0", "0", "0", "0"],
+      validUntilSlot: "372001500",
+    },
+    prepared: {
+      ...makerControlPrepared,
+      product: "current",
+      action: "current_upsert",
+    },
   };
   const platformPortfolio: PlatformPortfolioResponse = {
     schema_version: 2,
@@ -1020,6 +1064,29 @@ test("protocol tool discovery and calls obey the current public policy", async (
       portfolioHistory: async () => platformPortfolioHistory,
     },
     marketMaking: {
+      prepareStart: async (request: PlatformMakerQuickstartPrepareInput) => {
+        makerQuickstartPrepareRequest = request;
+        return makerQuickstartPrepared;
+      },
+      prepareStop: async () => ({
+        market: makerQuickstartPrepared.market,
+        product: "current" as const,
+        operation: { action: "cancel" as const, makerWallet: makerControlPrepared.maker_wallet },
+        prepared: { ...makerControlPrepared, product: "current" as const, action: "current_cancel" as const },
+      }),
+      submitPrepared: async (request: PlatformMakerSubmitPreparedInput) => {
+        makerQuickstartSubmitRequest = request;
+        return {
+          ...makerQuickstartPrepared,
+          receipt: {
+            ...makerControlSubmitted,
+            product: "current" as const,
+            action: "current_upsert" as const,
+          },
+          status: "confirmed" as const,
+          maker_status: platformMakerStatus,
+        };
+      },
       strand: {
         prepare: async (_marketId: string, request: PlatformMakerStrandPrepareInput) => {
           strandPrepareRequest = request;
@@ -1194,10 +1261,12 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_execution_submit",
         "strata_market_making_current_prepare",
         "strata_market_making_current_submit",
+        "strata_market_making_prepare",
         "strata_market_making_reputation",
         "strata_market_making_status",
         "strata_market_making_strand_prepare",
         "strata_market_making_strand_submit",
+        "strata_market_making_submit_and_wait",
         "strata_markets",
         "strata_marks",
         "strata_order_challenge",
@@ -1391,6 +1460,39 @@ test("protocol tool discovery and calls obey the current public policy", async (
     });
     assert.deepEqual(makerStatusResult.structuredContent, platformMakerStatus);
     assert.equal(makerStatusRequestedFor, walletAddress);
+    const makerQuickstartPrepareResult = await protocolClient.callTool({
+      name: "strata_market_making_prepare",
+      arguments: {
+        action: "start",
+        market: "SOL/USDC",
+        product: "current",
+        makerWallet: makerControlPrepared.maker_wallet,
+        spreadBps: 5,
+        size: "0.01 SOL",
+        duration: "10m",
+      },
+    });
+    assert.equal(makerQuickstartPrepareResult.isError, undefined);
+    assert.equal(makerQuickstartPrepareRequest?.market, "SOL/USDC");
+    assert.equal(makerQuickstartPrepareRequest?.size, "0.01 SOL");
+    assert.equal(
+      (makerQuickstartPrepareResult.structuredContent as { prepared?: { maker_control_id?: string } })
+        .prepared?.maker_control_id,
+      makerControlPrepared.maker_control_id,
+    );
+    const makerQuickstartSubmitResult = await protocolClient.callTool({
+      name: "strata_market_making_submit_and_wait",
+      arguments: {
+        makerControlId: makerControlPrepared.maker_control_id,
+        signedTransactionBase64: "AQ==",
+      },
+    });
+    assert.equal(makerQuickstartSubmitResult.isError, undefined);
+    assert.equal(makerQuickstartSubmitRequest?.signedTransactionBase64, "AQ==");
+    assert.equal(
+      (makerQuickstartSubmitResult.structuredContent as { status?: string }).status,
+      "confirmed",
+    );
     const reputationResult = await protocolClient.callTool({
       name: "strata_market_making_reputation",
       arguments: { marketId: platformMarketId, walletAddress },
@@ -1870,10 +1972,12 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_execution_submit",
         "strata_market_making_current_prepare",
         "strata_market_making_current_submit",
+        "strata_market_making_prepare",
         "strata_market_making_reputation",
         "strata_market_making_status",
         "strata_market_making_strand_prepare",
         "strata_market_making_strand_submit",
+        "strata_market_making_submit_and_wait",
         "strata_markets",
         "strata_marks",
         "strata_order_challenge",
