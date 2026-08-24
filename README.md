@@ -45,6 +45,8 @@ The tools currently available are:
 - `strata_portfolio_history`
 - `strata_market_making_status`
 - `strata_market_making_reputation`
+- `strata_market_making_prepare` — start or stop a Strand/Current from a market label, decimal base size, spread, and duration; no arrays or atom conversion
+- `strata_market_making_submit_and_wait` — submit the externally signed preparation idempotently and wait for matching chain-derived state
 - `strata_market_making_strand_prepare`, `strata_market_making_strand_submit`
 - `strata_market_making_current_prepare`, `strata_market_making_current_submit`
 - `strata_vault_status`
@@ -81,6 +83,27 @@ The tool list follows the live public policy. Every call rechecks that policy,
 so a disabled capability stops immediately even if a client cached an older
 tool list. Tool discovery from the connected server remains authoritative for
 self-hosted deployments or any future policy change.
+
+For normal maker operation, use two calls:
+
+1. Call `strata_market_making_prepare` with `action: "start"`, a label such as
+   `SOL/USDC`, `product: "current"` or `"strand"`, `spreadBps`, a decimal size
+   such as `0.01 SOL`, and the maker wallet. Duration defaults to ten minutes
+   and levels default to three.
+2. Verify and sign only `prepared.transaction_base64` in the external wallet,
+   then pass it and `prepared.maker_control_id` to
+   `strata_market_making_submit_and_wait`.
+
+The second call returns only after Strata's chain-derived maker status matches
+the exact product settings. Use `action: "stop"` through the same pair. The
+older product-specific tools remain available for strategies that deliberately
+manage every low-level array and safety field.
+
+For maker funding, initialize the market Vault if needed, activate the Strand
+or Current, then deposit with `strata_vault_deposit`. The market keeps that
+available collateral while a control is live and returns it after the final
+control is disabled, exhausted, expired, or cancelled. Current follows Strata's
+live mark and needs no separate publisher transaction.
 
 ## Hosted Streamable HTTP
 

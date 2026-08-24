@@ -12,6 +12,8 @@ import {
   type MarketsResponse,
   type PlatformMarket,
   type PlatformMakerCurrentPrepareInput,
+  type PlatformMakerQuickstartPrepared,
+  type PlatformMakerStopPrepared,
   type PlatformMakerStrandPrepareInput,
   type QuoteRequest,
   type QuoteResponse,
@@ -93,6 +95,8 @@ const LEGACY_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapabilityRequiremen
   strata_market_making_strand_submit: { ids: ["mm.strand.manage"] },
   strata_market_making_current_prepare: { ids: ["mm.current.manage"] },
   strata_market_making_current_submit: { ids: ["mm.current.manage"] },
+  strata_market_making_prepare: { ids: ["mm.strand.manage", "mm.current.manage"], match: "any" },
+  strata_market_making_submit_and_wait: { ids: ["mm.strand.manage", "mm.current.manage"], match: "any" },
   strata_execute_quote: { ids: ["trade.submit"] },
   strata_order_execute: { ids: ["orders.prepare", "orders.submit"] },
 };
@@ -134,6 +138,8 @@ const PLATFORM_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapabilityRequirem
   strata_market_making_strand_submit: { ids: ["mm.strand.manage"] },
   strata_market_making_current_prepare: { ids: ["mm.current.manage"] },
   strata_market_making_current_submit: { ids: ["mm.current.manage"] },
+  strata_market_making_prepare: { ids: ["mm.strand.manage", "mm.current.manage"], match: "any" },
+  strata_market_making_submit_and_wait: { ids: ["mm.strand.manage", "mm.current.manage"], match: "any" },
   strata_rewards: { ids: ["rewards.read"] },
   strata_referrals: { ids: ["referrals.read"] },
   strata_referral_link: { ids: ["referrals.link"] },
@@ -400,6 +406,10 @@ export async function createStrataMcpServer(
     },
   );
   const { registerTool, handles: registeredTools } = trackedToolRegistrar(server);
+  const makerQuickstartPreparations = new Map<
+    string,
+    PlatformMakerQuickstartPrepared | PlatformMakerStopPrepared
+  >();
 
   server.registerResource(
     "strata_agent_harness",
@@ -2052,6 +2062,130 @@ export async function createStrataMcpServer(
       }),
   );
 
+  const makerPrepare = registerTool(
+    "strata_market_making_prepare",
+    {
+      title: "Prepare simple Strata market making",
+      description:
+        "Prepare a pro-level Strand or Current from a market label, decimal base size, spread, and duration. Strata resolves IDs, decimals, live mark, tick grid, expiry, safety bounds, and fixed on-chain arrays. Sign only the returned transaction externally, then call submit_and_wait.",
+      inputSchema: {
+        action: z.enum(["start", "stop"]),
+        market: z.string().min(1).max(128),
+        product: z.enum(["strand", "current"]),
+        makerWallet: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        spreadBps: z.number().int().min(1).max(5_000).optional(),
+        size: z.string().min(1).max(64).optional(),
+        duration: z.union([
+          z.number().int().min(1).max(604_800),
+          z.string().regex(/^[1-9][0-9]*(?:s|m|h|d)$/i),
+        ]).optional(),
+        levels: z.number().int().min(1).max(16).optional(),
+        levelStepBps: z.number().int().min(1).max(5_000).optional(),
+        side: z.enum(["both", "buy", "sell"]).optional(),
+        asyncOnly: z.boolean().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (args) => guardedTool(client, `mm.${args.product}.manage`, async () => {
+      const prepared = args.action === "stop"
+        ? await platformClient.marketMaking.prepareStop({
+            market: args.market,
+            product: args.product,
+            makerWallet: args.makerWallet,
+          })
+        : (() => {
+            if (args.spreadBps === undefined || args.size === undefined) {
+              return undefined;
+            }
+            return platformClient.marketMaking.prepareStart({
+              market: args.market,
+              product: args.product,
+              makerWallet: args.makerWallet,
+              spreadBps: args.spreadBps,
+              size: args.size,
+              ...(args.duration === undefined ? {} : { duration: args.duration }),
+              ...(args.levels === undefined ? {} : { levels: args.levels }),
+              ...(args.levelStepBps === undefined ? {} : { levelStepBps: args.levelStepBps }),
+              ...(args.side === undefined ? {} : { side: args.side }),
+              ...(args.asyncOnly === undefined ? {} : { asyncOnly: args.asyncOnly }),
+            });
+          })();
+      if (prepared === undefined) {
+        return toolError("invalid_request", "Starting market making requires spreadBps and size.", false);
+      }
+      const resolved = await prepared;
+      makerQuickstartPreparations.set(resolved.prepared.maker_control_id, resolved);
+      while (makerQuickstartPreparations.size > 128) {
+        const oldest = makerQuickstartPreparations.keys().next().value as string | undefined;
+        if (oldest === undefined) break;
+        makerQuickstartPreparations.delete(oldest);
+      }
+      const response = {
+        action: args.action,
+        market: resolved.market,
+        product: resolved.product,
+        ...("base_asset" in resolved ? { base_asset: resolved.base_asset } : {}),
+        operation: resolved.operation,
+        prepared: resolved.prepared,
+      };
+      return toolResult(
+        response,
+        `Prepared ${args.action} for ${resolved.market.label} as ${resolved.prepared.maker_control_id}. Verify and sign only prepared.transaction_base64, then submit it within 30 seconds.`,
+      );
+    }),
+  );
+
+  const makerSubmitAndWait = registerTool(
+    "strata_market_making_submit_and_wait",
+    {
+      title: "Submit and confirm Strata market making",
+      description:
+        "Submit the exact externally signed quickstart transaction and wait until Strata's chain-derived maker state confirms the product started or stopped. The control ID is its default idempotency key.",
+      inputSchema: {
+        makerControlId: z.string().regex(/^mc_[0-9a-f]{32}$/),
+        signedTransactionBase64: z.string().min(4).max(4_096).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+        idempotencyKey: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
+        confirmationTimeoutMs: z.number().int().min(1_000).max(120_000).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async (args) => {
+      const prepared = makerQuickstartPreparations.get(args.makerControlId);
+      if (!prepared) {
+        return toolError(
+          "session_expired",
+          "This quickstart preparation is not in the current MCP session. Prepare it again; maker transactions expire after 30 seconds.",
+          false,
+        );
+      }
+      return guardedTool(client, `mm.${prepared.product}.manage`, async () => {
+        const response = await platformClient.marketMaking.submitPrepared({
+          prepared,
+          signedTransactionBase64: args.signedTransactionBase64,
+          ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
+          ...(args.confirmationTimeoutMs === undefined
+            ? {}
+            : { confirmationTimeoutMs: args.confirmationTimeoutMs }),
+        });
+        makerQuickstartPreparations.delete(args.makerControlId);
+        return toolResult(
+          response,
+          `${response.product} is confirmed ${response.operation.action === "cancel" ? "stopped" : "live"} on ${response.market.label}.`,
+        );
+      });
+    },
+  );
+
   const makerStrandPrepare = registerTool(
     "strata_market_making_strand_prepare",
     {
@@ -2276,6 +2410,8 @@ export async function createStrataMcpServer(
     orderPrepare,
     orderSubmit,
     orderStatus,
+    makerPrepare,
+    makerSubmitAndWait,
     makerStrandPrepare,
     makerStrandSubmit,
     makerCurrentPrepare,
