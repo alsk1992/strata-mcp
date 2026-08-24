@@ -91,13 +91,15 @@ For normal maker operation, use two calls:
    such as `0.01 SOL`, and the maker wallet. Duration defaults to ten minutes
    and levels default to three.
 2. Verify and sign only `prepared.transaction_base64` in the external wallet,
-   then pass it and `prepared.maker_control_id` to
-   `strata_market_making_submit_and_wait`.
+   then pass it, `prepared.maker_control_id`, and the unchanged
+   `preparationToken` to `strata_market_making_submit_and_wait`.
 
 The second call returns only after Strata's chain-derived maker status matches
-the exact product settings. Use `action: "stop"` through the same pair. The
-older product-specific tools remain available for strategies that deliberately
-manage every low-level array and safety field.
+the exact product settings. The token contains no signing authority and keeps
+the two-call flow working across stateless HTTP requests or an MCP process
+restart. Use `action: "stop"` through the same pair. The older product-specific
+tools remain available for strategies that deliberately manage every low-level
+array and safety field.
 
 For maker funding, initialize the market Vault if needed, activate the Strand
 or Current, then deposit with `strata_vault_deposit`. The market keeps that
