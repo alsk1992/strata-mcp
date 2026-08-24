@@ -1480,18 +1480,53 @@ test("protocol tool discovery and calls obey the current public policy", async (
         .prepared?.maker_control_id,
       makerControlPrepared.maker_control_id,
     );
-    const makerQuickstartSubmitResult = await protocolClient.callTool({
-      name: "strata_market_making_submit_and_wait",
-      arguments: {
-        makerControlId: makerControlPrepared.maker_control_id,
-        signedTransactionBase64: "AQ==",
-      },
+    const makerPreparationToken = (
+      makerQuickstartPrepareResult.structuredContent as { preparationToken?: string }
+    ).preparationToken;
+    assert.match(makerPreparationToken ?? "", /^[A-Za-z0-9_-]+$/);
+    // Hosted Streamable HTTP creates a fresh runtime for each request. Prove
+    // the continuation does not depend on process-local preparation state.
+    const restartedRuntime = await createStrataMcpServer({
+      client: fakeClient,
+      platformClient: fakePlatformClient,
     });
+    const restartedClient = new Client({ name: "strata-mcp-restart-test", version: "1.0.0" });
+    const [restartedClientTransport, restartedServerTransport] =
+      InMemoryTransport.createLinkedPair();
+    let makerQuickstartSubmitResult;
+    try {
+      await restartedRuntime.server.connect(restartedServerTransport);
+      await restartedClient.connect(restartedClientTransport);
+      makerQuickstartSubmitResult = await restartedClient.callTool({
+        name: "strata_market_making_submit_and_wait",
+        arguments: {
+          makerControlId: makerControlPrepared.maker_control_id,
+          preparationToken: makerPreparationToken,
+          signedTransactionBase64: "AQ==",
+        },
+      });
+    } finally {
+      await restartedClient.close();
+      await restartedRuntime.close();
+    }
     assert.equal(makerQuickstartSubmitResult.isError, undefined);
     assert.equal(makerQuickstartSubmitRequest?.signedTransactionBase64, "AQ==");
     assert.equal(
       (makerQuickstartSubmitResult.structuredContent as { status?: string }).status,
       "confirmed",
+    );
+    const mismatchedMakerQuickstartSubmitResult = await protocolClient.callTool({
+      name: "strata_market_making_submit_and_wait",
+      arguments: {
+        makerControlId: "mc_99999999999999999999999999999999",
+        preparationToken: makerPreparationToken,
+        signedTransactionBase64: "AQ==",
+      },
+    });
+    assert.equal(mismatchedMakerQuickstartSubmitResult.isError, true);
+    assert.match(
+      JSON.stringify(mismatchedMakerQuickstartSubmitResult.structuredContent),
+      /binding_mismatch/,
     );
     const reputationResult = await protocolClient.callTool({
       name: "strata_market_making_reputation",

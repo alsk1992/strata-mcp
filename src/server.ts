@@ -75,6 +75,161 @@ export interface StrataMcpReadiness {
 const REFRESH_INTERVAL_MS = 5_000;
 export const STRATA_PLATFORM_GRAPH_URI = "strata://platform-graph/v2";
 
+const makerPublicKeySchema = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+const makerMarketIdSchema = z.string().regex(/^market_[0-9a-f]{32}$/);
+const makerAssetIdSchema = z.string().regex(/^asset_[0-9a-f]{32}$/);
+const makerControlIdSchema = z.string().regex(/^mc_[0-9a-f]{32}$/);
+const makerAtomicSchema = z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(20);
+const makerPositiveAtomicSchema = z.string().regex(/^[1-9][0-9]*$/).max(20);
+const makerBase64Schema = z.string().min(4).max(4_096)
+  .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/);
+const makerMarketSchema = z.object({
+  market_id: makerMarketIdSchema,
+  label: z.string().min(1).max(128),
+  base_asset_id: makerAssetIdSchema,
+  quote_asset_id: makerAssetIdSchema,
+  status: z.enum([
+    "active",
+    "read_only",
+    "quote_only",
+    "cancel_only",
+    "paused",
+    "warming",
+    "degraded",
+    "unavailable",
+  ]),
+  available_actions: z.array(z.enum([
+    "quote",
+    "execute_immediate",
+    "place_order",
+    "schedule_twap",
+  ])).max(4),
+}).strict();
+const makerAssetSchema = z.object({
+  asset_id: makerAssetIdSchema,
+  symbol: z.string().min(1).max(32),
+  name: z.string().min(1).max(128),
+  decimals: z.number().int().min(0).max(18),
+  logo_url: z.string().url().optional(),
+  network: z.literal("solana"),
+}).strict();
+const makerStrandOperationSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("upsert"),
+    makerWallet: makerPublicKeySchema,
+    enabled: z.boolean(),
+    asyncOnly: z.boolean(),
+    syncSpreadTicks: z.number().int().min(0).max(65_535),
+    midPriceAtoms: makerPositiveAtomicSchema,
+    maxExposureBaseAtoms: makerPositiveAtomicSchema,
+    bidOffsetsTicks: z.array(z.number().int().min(0).max(65_535)).length(16),
+    askOffsetsTicks: z.array(z.number().int().min(0).max(65_535)).length(16),
+    bidSizesBaseAtoms: z.array(makerAtomicSchema).length(16),
+    askSizesBaseAtoms: z.array(makerAtomicSchema).length(16),
+    validUntilSlot: makerPositiveAtomicSchema,
+  }).strict(),
+  z.object({
+    action: z.literal("cancel"),
+    makerWallet: makerPublicKeySchema,
+  }).strict(),
+]);
+const makerCurrentOperationSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("upsert"),
+    makerWallet: makerPublicKeySchema,
+    enabled: z.boolean(),
+    asyncOnly: z.boolean(),
+    halfSpreadBps: z.number().int().min(1).max(65_535),
+    bandStepBps: z.number().int().min(0).max(65_535),
+    maxConfidenceBps: z.number().int().min(1).max(100),
+    maxOracleDeviationBps: z.number().int().min(1).max(500),
+    maxOracleAgeSeconds: z.number().int().min(0).max(4_294_967_295),
+    syncSpreadBps: z.number().int().min(0).max(65_535),
+    maxExposureBaseAtoms: makerPositiveAtomicSchema,
+    bidDepthBaseAtoms: z.array(makerAtomicSchema).length(8),
+    askDepthBaseAtoms: z.array(makerAtomicSchema).length(8),
+    validUntilSlot: makerPositiveAtomicSchema,
+  }).strict(),
+  z.object({
+    action: z.literal("cancel"),
+    makerWallet: makerPublicKeySchema,
+  }).strict(),
+]);
+const makerPreparedResponseSchema = z.object({
+  schema_version: z.literal(2),
+  contract_version: z.literal("2.0"),
+  maker_control_id: makerControlIdSchema,
+  market_id: makerMarketIdSchema,
+  maker_wallet: makerPublicKeySchema,
+  product: z.enum(["strand", "current"]),
+  action: z.enum([
+    "strand_upsert",
+    "strand_recenter",
+    "strand_set_enabled",
+    "strand_cancel",
+    "current_upsert",
+    "current_cancel",
+  ]),
+  transaction_base64: makerBase64Schema,
+  recent_blockhash: makerPublicKeySchema,
+  last_valid_block_height: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  expires_at_ms: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+}).strict();
+const makerPreparationSchema = z.object({
+  market: makerMarketSchema,
+  base_asset: makerAssetSchema.optional(),
+  product: z.enum(["strand", "current"]),
+  operation: z.union([makerStrandOperationSchema, makerCurrentOperationSchema]),
+  prepared: makerPreparedResponseSchema,
+}).strict();
+const makerPreparationEnvelopeSchema = z.object({
+  version: z.literal(1),
+  preparation: makerPreparationSchema,
+}).strict();
+
+type MakerQuickstartPreparation = PlatformMakerQuickstartPrepared | PlatformMakerStopPrepared;
+
+function encodeMakerPreparationToken(preparation: MakerQuickstartPreparation): string {
+  const checked = makerPreparationSchema.parse(preparation);
+  return Buffer.from(JSON.stringify({ version: 1, preparation: checked }), "utf8")
+    .toString("base64url");
+}
+
+function decodeMakerPreparationToken(token: string): MakerQuickstartPreparation {
+  let decoded: unknown;
+  try {
+    const bytes = Buffer.from(token, "base64url");
+    if (bytes.toString("base64url") !== token) {
+      throw new Error("non-canonical base64url");
+    }
+    decoded = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new Error("preparationToken is not valid encoded JSON");
+  }
+  const { preparation } = makerPreparationEnvelopeSchema.parse(decoded);
+  const expectedAction = preparation.product === "strand"
+    ? preparation.operation.action === "upsert" ? "strand_upsert" : "strand_cancel"
+    : preparation.operation.action === "upsert" ? "current_upsert" : "current_cancel";
+  if (
+    preparation.prepared.product !== preparation.product
+    || preparation.prepared.action !== expectedAction
+    || preparation.prepared.market_id !== preparation.market.market_id
+    || preparation.prepared.maker_wallet !== preparation.operation.makerWallet
+    || (preparation.product === "strand"
+      && preparation.operation.action === "upsert"
+      && !("midPriceAtoms" in preparation.operation))
+    || (preparation.product === "current"
+      && preparation.operation.action === "upsert"
+      && !("halfSpreadBps" in preparation.operation))
+    || (preparation.operation.action === "upsert" && preparation.base_asset === undefined)
+    || (preparation.base_asset !== undefined
+      && preparation.base_asset.asset_id !== preparation.market.base_asset_id)
+  ) {
+    throw new Error("preparationToken contains inconsistent maker bindings");
+  }
+  return preparation as MakerQuickstartPreparation;
+}
+
 type ToolCapabilityRequirement = {
   readonly ids: readonly string[];
   readonly match?: "all" | "any";
@@ -406,11 +561,6 @@ export async function createStrataMcpServer(
     },
   );
   const { registerTool, handles: registeredTools } = trackedToolRegistrar(server);
-  const makerQuickstartPreparations = new Map<
-    string,
-    PlatformMakerQuickstartPrepared | PlatformMakerStopPrepared
-  >();
-
   server.registerResource(
     "strata_agent_harness",
     STRATA_AGENT_HARNESS_URI,
@@ -2119,12 +2269,6 @@ export async function createStrataMcpServer(
         return toolError("invalid_request", "Starting market making requires spreadBps and size.", false);
       }
       const resolved = await prepared;
-      makerQuickstartPreparations.set(resolved.prepared.maker_control_id, resolved);
-      while (makerQuickstartPreparations.size > 128) {
-        const oldest = makerQuickstartPreparations.keys().next().value as string | undefined;
-        if (oldest === undefined) break;
-        makerQuickstartPreparations.delete(oldest);
-      }
       const response = {
         action: args.action,
         market: resolved.market,
@@ -2132,10 +2276,11 @@ export async function createStrataMcpServer(
         ...("base_asset" in resolved ? { base_asset: resolved.base_asset } : {}),
         operation: resolved.operation,
         prepared: resolved.prepared,
+        preparationToken: encodeMakerPreparationToken(resolved),
       };
       return toolResult(
         response,
-        `Prepared ${args.action} for ${resolved.market.label} as ${resolved.prepared.maker_control_id}. Verify and sign only prepared.transaction_base64, then submit it within 30 seconds.`,
+        `Prepared ${args.action} for ${resolved.market.label} as ${resolved.prepared.maker_control_id}. Verify and sign only prepared.transaction_base64, then pass preparationToken unchanged to submit_and_wait within 30 seconds.`,
       );
     }),
   );
@@ -2145,9 +2290,10 @@ export async function createStrataMcpServer(
     {
       title: "Submit and confirm Strata market making",
       description:
-        "Submit the exact externally signed quickstart transaction and wait until Strata's chain-derived maker state confirms the product started or stopped. The control ID is its default idempotency key.",
+        "Submit the exact externally signed quickstart transaction with the unchanged preparation token and wait until Strata's chain-derived maker state confirms the product started or stopped. The token survives stateless HTTP requests and server restarts; the control ID is its default idempotency key.",
       inputSchema: {
         makerControlId: z.string().regex(/^mc_[0-9a-f]{32}$/),
+        preparationToken: z.string().min(16).max(32_768).regex(/^[A-Za-z0-9_-]+$/),
         signedTransactionBase64: z.string().min(4).max(4_096).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
         idempotencyKey: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
         confirmationTimeoutMs: z.number().int().min(1_000).max(120_000).optional(),
@@ -2160,11 +2306,20 @@ export async function createStrataMcpServer(
       },
     },
     async (args) => {
-      const prepared = makerQuickstartPreparations.get(args.makerControlId);
-      if (!prepared) {
+      let prepared: MakerQuickstartPreparation;
+      try {
+        prepared = decodeMakerPreparationToken(args.preparationToken);
+      } catch {
         return toolError(
-          "session_expired",
-          "This quickstart preparation is not in the current MCP session. Prepare it again; maker transactions expire after 30 seconds.",
+          "invalid_request",
+          "preparationToken is invalid. Pass the token returned by strata_market_making_prepare unchanged.",
+          false,
+        );
+      }
+      if (prepared.prepared.maker_control_id !== args.makerControlId) {
+        return toolError(
+          "binding_mismatch",
+          "makerControlId does not match preparationToken.",
           false,
         );
       }
@@ -2177,7 +2332,6 @@ export async function createStrataMcpServer(
             ? {}
             : { confirmationTimeoutMs: args.confirmationTimeoutMs }),
         });
-        makerQuickstartPreparations.delete(args.makerControlId);
         return toolResult(
           response,
           `${response.product} is confirmed ${response.operation.action === "cancel" ? "stopped" : "live"} on ${response.market.label}.`,
