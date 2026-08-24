@@ -20,6 +20,7 @@ import {
   type PlatformOrderBatchOperation,
   type PlatformOrderStatusResponse,
   type PlatformActionGraphResponse,
+  type PlatformDiscoveryResponse,
   type PlatformSwapQuoteResponse,
   type PlatformReferralClaimResponse,
   type PlatformReferralLinkResponse,
@@ -72,21 +73,75 @@ export interface StrataMcpReadiness {
 const REFRESH_INTERVAL_MS = 5_000;
 export const STRATA_PLATFORM_GRAPH_URI = "strata://platform-graph/v2";
 
-type ToolHandles = {
-  markets: RegisteredTool;
-  quote: RegisteredTool;
-  exactOutputQuote: RegisteredTool;
-  executionChallenge: RegisteredTool;
-  executionPrepare: RegisteredTool;
-  executionSubmit: RegisteredTool;
-  orderChallenge: RegisteredTool;
-  orderPrepare: RegisteredTool;
-  orderSubmit: RegisteredTool;
-  orderStatus: RegisteredTool;
-  makerStrandPrepare: RegisteredTool;
-  makerStrandSubmit: RegisteredTool;
-  makerCurrentPrepare: RegisteredTool;
-  makerCurrentSubmit: RegisteredTool;
+type ToolCapabilityRequirement = {
+  readonly ids: readonly string[];
+  readonly match?: "all" | "any";
+};
+
+const LEGACY_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapabilityRequirement>> = {
+  strata_markets: { ids: ["markets.read"] },
+  strata_quote: { ids: ["quotes.read"] },
+  strata_exact_output_quote: { ids: ["quotes.read"] },
+  strata_execution_challenge: { ids: ["trade.prepare"] },
+  strata_execution_prepare: { ids: ["trade.prepare"] },
+  strata_execution_submit: { ids: ["trade.submit"] },
+  strata_order_challenge: { ids: ["orders.prepare"] },
+  strata_order_prepare: { ids: ["orders.prepare"] },
+  strata_order_submit: { ids: ["orders.submit"] },
+  strata_order_status: { ids: ["orders.submit"] },
+  strata_market_making_strand_prepare: { ids: ["mm.strand.manage"] },
+  strata_market_making_strand_submit: { ids: ["mm.strand.manage"] },
+  strata_market_making_current_prepare: { ids: ["mm.current.manage"] },
+  strata_market_making_current_submit: { ids: ["mm.current.manage"] },
+  strata_execute_quote: { ids: ["trade.submit"] },
+  strata_order_execute: { ids: ["orders.prepare", "orders.submit"] },
+};
+
+const PLATFORM_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapabilityRequirement>> = {
+  strata_status: { ids: ["platform.status.read"] },
+  strata_platform_graph: { ids: ["graphs.read"] },
+  strata_candles: { ids: ["market_data.candles.read"] },
+  strata_marks: { ids: ["market_data.marks.read"] },
+  strata_quote: { ids: ["quotes.market.read"] },
+  strata_swap_quote: { ids: ["quotes.swap.read"] },
+  strata_exact_output_quote: { ids: ["quotes.exact_output.read"] },
+  strata_execution_challenge: { ids: ["execution.prepare"] },
+  strata_execution_prepare: { ids: ["execution.prepare"] },
+  strata_execution_submit: { ids: ["execution.submit"] },
+  strata_execution_status: { ids: ["execution.status.read"] },
+  strata_order_challenge: { ids: ["orders.prepare"] },
+  strata_order_prepare: { ids: ["orders.prepare"] },
+  strata_order_submit: { ids: ["orders.submit"] },
+  strata_twap_challenge: { ids: ["algos.twap.place"] },
+  strata_twap_cancel: { ids: ["algos.twap.cancel"] },
+  strata_twap_prepare: { ids: ["algos.twap.place", "algos.twap.cancel"], match: "any" },
+  strata_twap_submit: { ids: ["algos.twap.place", "algos.twap.cancel"], match: "any" },
+  strata_twaps: { ids: ["algos.twap.read"] },
+  strata_portfolio: { ids: ["portfolio.read"] },
+  strata_portfolio_history: { ids: ["portfolio.history.read"] },
+  strata_vault_status: { ids: ["vault.status.read"] },
+  strata_vault_setup: { ids: ["vault.setup"] },
+  strata_vault_deposit: { ids: ["vault.deposit"] },
+  strata_vault_withdraw: { ids: ["vault.withdraw"] },
+  strata_vault_delegate: { ids: ["vault.delegate.manage"] },
+  strata_vault_policy: { ids: ["vault.policy.manage"] },
+  strata_vault_pause: { ids: ["vault.pause"] },
+  strata_vault_submit: { ids: ["vault.relay"] },
+  strata_vault_submission: { ids: ["vault.relay"] },
+  strata_market_making_status: { ids: ["mm.status.read"] },
+  strata_market_making_reputation: { ids: ["mm.reputation.read"] },
+  strata_market_making_strand_prepare: { ids: ["mm.strand.manage"] },
+  strata_market_making_strand_submit: { ids: ["mm.strand.manage"] },
+  strata_market_making_current_prepare: { ids: ["mm.current.manage"] },
+  strata_market_making_current_submit: { ids: ["mm.current.manage"] },
+  strata_rewards: { ids: ["rewards.read"] },
+  strata_referrals: { ids: ["referrals.read"] },
+  strata_referral_link: { ids: ["referrals.link"] },
+  strata_referral_claim: { ids: ["referrals.claim"] },
+  strata_bug_submit: { ids: ["bugs.submit"] },
+  strata_bugs: { ids: ["bugs.read"] },
+  strata_order_execute: { ids: ["orders.prepare", "orders.submit"] },
+  strata_twap_execute: { ids: ["algos.twap.place", "algos.twap.cancel"], match: "any" },
 };
 
 export function capabilityAvailable(catalog: CapabilityCatalog, id: string): boolean {
@@ -334,6 +389,7 @@ export async function createStrataMcpServer(
   if (initialCatalog.contract_version !== STRATA_AGENT_HARNESS.contract_version) {
     throw new Error("agent harness and live contract versions differ");
   }
+  const initialPlatformCatalog = await platformClient.discovery.read();
   const server = new McpServer(
     {
       name: "strata",
@@ -343,6 +399,7 @@ export async function createStrataMcpServer(
       instructions: STRATA_AGENT_HARNESS_INSTRUCTIONS,
     },
   );
+  const { registerTool, handles: registeredTools } = trackedToolRegistrar(server);
 
   server.registerResource(
     "strata_agent_harness",
@@ -430,7 +487,7 @@ export async function createStrataMcpServer(
     }),
   );
 
-  server.registerTool(
+  registerTool(
     "strata_capabilities",
     {
       title: "Strata capabilities",
@@ -446,7 +503,7 @@ export async function createStrataMcpServer(
     async () => toolResult(await client.capabilities(), "Current Strata capabilities."),
   );
 
-  server.registerTool(
+  registerTool(
     "strata_action_graph",
     {
       title: "Strata action graph",
@@ -462,7 +519,7 @@ export async function createStrataMcpServer(
     async () => toolResult(await client.actionGraph(), "Current Strata action graph."),
   );
 
-  server.registerTool(
+  registerTool(
     "strata_platform_graph",
     {
       title: "Strata platform graph",
@@ -485,7 +542,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_market_making_status",
     {
       title: "Read Strata maker status",
@@ -511,7 +568,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_market_making_reputation",
     {
       title: "Read Strata maker reputation",
@@ -534,7 +591,7 @@ export async function createStrataMcpServer(
     ),
   );
 
-  server.registerTool(
+  registerTool(
     "strata_status",
     {
       title: "Strata status",
@@ -555,7 +612,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_candles",
     {
       title: "Strata candles",
@@ -583,7 +640,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_marks",
     {
       title: "Strata mark",
@@ -604,7 +661,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_book",
     {
       title: "Strata order book",
@@ -640,7 +697,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_bbo",
     {
       title: "Strata best bid/ask",
@@ -665,7 +722,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_trades",
     {
       title: "Strata recent trades",
@@ -697,7 +754,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_execution_status",
     {
       title: "Strata execution status",
@@ -719,7 +776,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_twaps",
     {
       title: "Strata TWAPs",
@@ -741,7 +798,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_twap_challenge",
     {
       title: "Prepare a Strata TWAP authorization",
@@ -780,7 +837,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_twap_cancel",
     {
       title: "Prepare Strata TWAP cancellation",
@@ -809,7 +866,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_twap_prepare",
     {
       title: "Prepare Strata TWAP transaction",
@@ -891,7 +948,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_twap_submit",
     {
       title: "Submit Strata TWAP transaction",
@@ -919,7 +976,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_portfolio",
     {
       title: "Strata account",
@@ -950,7 +1007,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_portfolio_history",
     {
       title: "Strata portfolio history",
@@ -972,7 +1029,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_vault_status",
     {
       title: "Strata Vault status",
@@ -1000,7 +1057,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_vault_pause",
     {
       title: "Prepare Strata Vault pause",
@@ -1026,7 +1083,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_vault_setup",
     {
       title: "Prepare Strata Vault onboarding",
@@ -1084,7 +1141,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_vault_deposit",
     {
       title: "Prepare Strata Vault deposit",
@@ -1120,7 +1177,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_vault_withdraw",
     {
       title: "Prepare Strata Vault withdrawal",
@@ -1155,7 +1212,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_vault_delegate",
     {
       title: "Prepare Strata Vault session control",
@@ -1186,7 +1243,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_vault_policy",
     {
       title: "Prepare Strata Vault withdrawal policy",
@@ -1218,7 +1275,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_vault_submit",
     {
       title: "Submit a prepared Strata Vault transaction",
@@ -1254,7 +1311,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_vault_submission",
     {
       title: "Strata Vault submission status",
@@ -1279,7 +1336,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_rewards",
     {
       title: "Strata rewards",
@@ -1301,7 +1358,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_referrals",
     {
       title: "Strata referrals",
@@ -1322,7 +1379,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_referral_link",
     {
       title: "Link a Strata referral",
@@ -1357,7 +1414,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_referral_claim",
     {
       title: "Claim Strata referral rewards",
@@ -1394,7 +1451,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_bugs",
     {
       title: "Strata bug reports",
@@ -1415,7 +1472,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  server.registerTool(
+  registerTool(
     "strata_bug_submit",
     {
       title: "Submit Strata bug report",
@@ -1451,7 +1508,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  const markets = server.registerTool(
+  const markets = registerTool(
     "strata_markets",
     {
       title: "Strata markets",
@@ -1496,7 +1553,7 @@ export async function createStrataMcpServer(
       }),
   );
 
-  const quote = server.registerTool(
+  const quote = registerTool(
     "strata_quote",
     {
       title: "Sonar quote",
@@ -1548,7 +1605,7 @@ export async function createStrataMcpServer(
       }),
   );
 
-  const exactOutputQuote = server.registerTool(
+  const exactOutputQuote = registerTool(
     "strata_exact_output_quote",
     {
       title: "Sonar exact-output quote",
@@ -1606,7 +1663,7 @@ export async function createStrataMcpServer(
       }),
   );
 
-  server.registerTool(
+  registerTool(
     "strata_swap_quote",
     {
       title: "Sonar asset swap quote",
@@ -1641,7 +1698,7 @@ export async function createStrataMcpServer(
     },
   );
 
-  const executionChallenge = server.registerTool(
+  const executionChallenge = registerTool(
     "strata_execution_challenge",
     {
       title: "Strata execution challenge",
@@ -1689,7 +1746,7 @@ export async function createStrataMcpServer(
       }),
   );
 
-  const executionPrepare = server.registerTool(
+  const executionPrepare = registerTool(
     "strata_execution_prepare",
     {
       title: "Prepare Strata execution",
@@ -1749,7 +1806,7 @@ export async function createStrataMcpServer(
       }),
   );
 
-  const executionSubmit = server.registerTool(
+  const executionSubmit = registerTool(
     "strata_execution_submit",
     {
       title: "Submit Strata execution",
@@ -1797,7 +1854,7 @@ export async function createStrataMcpServer(
       }),
   );
 
-  const orderChallenge = server.registerTool(
+  const orderChallenge = registerTool(
     "strata_order_challenge",
     {
       title: "Strata order challenge",
@@ -1852,7 +1909,7 @@ export async function createStrataMcpServer(
     }),
   );
 
-  const orderPrepare = server.registerTool(
+  const orderPrepare = registerTool(
     "strata_order_prepare",
     {
       title: "Prepare Strata order control",
@@ -1928,7 +1985,7 @@ export async function createStrataMcpServer(
       }),
   );
 
-  const orderSubmit = server.registerTool(
+  const orderSubmit = registerTool(
     "strata_order_submit",
     {
       title: "Submit Strata order control",
@@ -1964,7 +2021,7 @@ export async function createStrataMcpServer(
       }),
   );
 
-  const orderStatus = server.registerTool(
+  const orderStatus = registerTool(
     "strata_order_status",
     {
       title: "Read Strata order-control status",
@@ -1995,7 +2052,7 @@ export async function createStrataMcpServer(
       }),
   );
 
-  const makerStrandPrepare = server.registerTool(
+  const makerStrandPrepare = registerTool(
     "strata_market_making_strand_prepare",
     {
       title: "Prepare Strata Strand control",
@@ -2076,7 +2133,7 @@ export async function createStrataMcpServer(
     }),
   );
 
-  const makerStrandSubmit = server.registerTool(
+  const makerStrandSubmit = registerTool(
     "strata_market_making_strand_submit",
     {
       title: "Submit Strata Strand control",
@@ -2105,12 +2162,12 @@ export async function createStrataMcpServer(
       }),
   );
 
-  const makerCurrentPrepare = server.registerTool(
+  const makerCurrentPrepare = registerTool(
     "strata_market_making_current_prepare",
     {
       title: "Prepare Strata Current control",
       description:
-        "Build one exact unsigned maker-owned Current transaction. Upsert fails closed until the market has a verified on-chain reference; cancel does not need that reference.",
+        "Build one exact unsigned maker-owned Current transaction. Upsert prices its bands from the market's live Strata mark; cancel remains available independently.",
       inputSchema: {
         marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
         action: z.enum(["upsert", "cancel"]),
@@ -2175,7 +2232,7 @@ export async function createStrataMcpServer(
     }),
   );
 
-  const makerCurrentSubmit = server.registerTool(
+  const makerCurrentSubmit = registerTool(
     "strata_market_making_current_submit",
     {
       title: "Submit Strata Current control",
@@ -2204,11 +2261,11 @@ export async function createStrataMcpServer(
       }),
   );
 
-  registerAutonomyTools(server, client, platformClient, options.sessionAutonomy, () =>
+  registerAutonomyTools(registerTool, client, platformClient, options.sessionAutonomy, () =>
     typeof Date !== "undefined" ? Date.now() : 0,
   );
 
-  const handles: ToolHandles = {
+  void [
     markets,
     quote,
     exactOutputQuote,
@@ -2223,12 +2280,16 @@ export async function createStrataMcpServer(
     makerStrandSubmit,
     makerCurrentPrepare,
     makerCurrentSubmit,
-  };
-  applyCapabilityCatalog(handles, initialCatalog);
+  ];
+  applyToolAvailability(registeredTools, initialCatalog, initialPlatformCatalog);
   let closed = false;
   const refresh = async () => {
     if (closed) return;
-    applyCapabilityCatalog(handles, await client.capabilities());
+    const [catalog, platformCatalog] = await Promise.all([
+      client.capabilities(),
+      platformClient.discovery.read(),
+    ]);
+    applyToolAvailability(registeredTools, catalog, platformCatalog);
   };
   const timer = setInterval(() => {
     refresh().catch((error: unknown) => {
@@ -2249,7 +2310,7 @@ export async function createStrataMcpServer(
 }
 
 function registerAutonomyTools(
-  server: McpServer,
+  registerTool: McpServer["registerTool"],
   client: StrataClient,
   platformClient: StrataPlatformClient,
   autonomy: SessionAutonomy | undefined,
@@ -2257,7 +2318,7 @@ function registerAutonomyTools(
 ): void {
   // Always present, always read-only: the agent may show the slider and offer
   // to change it, but nothing it calls can raise its own autonomy.
-  server.registerTool(
+  registerTool(
     "strata_autonomy",
     {
       title: "Strata session autonomy",
@@ -2339,7 +2400,7 @@ function registerAutonomyTools(
     toolResult({ executed: false, reason, prepared }, summary);
 
   // ── one-shot immediate execution from a fresh Sonar quote ─────────────────
-  server.registerTool(
+  registerTool(
     "strata_execute_quote",
     {
       title: "Execute a Strata quote",
@@ -2400,7 +2461,7 @@ function registerAutonomyTools(
   );
 
   // ── one-shot order control (place / cancel / replace / batch) ─────────────
-  server.registerTool(
+  registerTool(
     "strata_order_execute",
     {
       title: "Execute a Strata order control",
@@ -2471,7 +2532,7 @@ function registerAutonomyTools(
   );
 
   // ── one-shot TWAP (schedule / cancel) ─────────────────────────────────────
-  server.registerTool(
+  registerTool(
     "strata_twap_execute",
     {
       title: "Execute a Strata TWAP",
@@ -2499,7 +2560,7 @@ function registerAutonomyTools(
       },
     },
     async (args) =>
-      guardedTool(client, "algos.submit", async () => {
+      safeTool(async () => {
         let operation: PlatformTwapExecuteOperation;
         if (args.action === "cancel") {
           if (args.twapId === undefined) return toolError("invalid_request", "Cancel requires twapId.", false);
@@ -2553,23 +2614,59 @@ function registerAutonomyTools(
   );
 }
 
-function applyCapabilityCatalog(handles: ToolHandles, catalog: CapabilityCatalog): void {
-  setToolEnabled(handles.markets, capabilityAvailable(catalog, "markets.read"));
-  setToolEnabled(handles.quote, capabilityAvailable(catalog, "quotes.read"));
-  setToolEnabled(handles.exactOutputQuote, capabilityAvailable(catalog, "quotes.read"));
-  setToolEnabled(handles.executionChallenge, capabilityAvailable(catalog, "trade.prepare"));
-  setToolEnabled(handles.executionPrepare, capabilityAvailable(catalog, "trade.prepare"));
-  setToolEnabled(handles.executionSubmit, capabilityAvailable(catalog, "trade.submit"));
-  setToolEnabled(handles.orderChallenge, capabilityAvailable(catalog, "orders.prepare"));
-  setToolEnabled(handles.orderPrepare, capabilityAvailable(catalog, "orders.prepare"));
-  setToolEnabled(handles.orderSubmit, capabilityAvailable(catalog, "orders.submit"));
-  setToolEnabled(handles.orderStatus, capabilityAvailable(catalog, "orders.submit"));
-  const strandEnabled = capabilityAvailable(catalog, "mm.strand.manage");
-  setToolEnabled(handles.makerStrandPrepare, strandEnabled);
-  setToolEnabled(handles.makerStrandSubmit, strandEnabled);
-  const currentEnabled = capabilityAvailable(catalog, "mm.current.manage");
-  setToolEnabled(handles.makerCurrentPrepare, currentEnabled);
-  setToolEnabled(handles.makerCurrentSubmit, currentEnabled);
+function trackedToolRegistrar(server: McpServer): {
+  registerTool: McpServer["registerTool"];
+  handles: Map<string, RegisteredTool>;
+} {
+  const handles = new Map<string, RegisteredTool>();
+  const register = server.registerTool.bind(server) as (...args: unknown[]) => RegisteredTool;
+  const registerTool = ((...args: unknown[]) => {
+    const tool = register(...args);
+    const name = args[0];
+    if (typeof name === "string") handles.set(name, tool);
+    return tool;
+  }) as typeof server.registerTool;
+  return { registerTool, handles };
+}
+
+function platformCapabilityAvailable(
+  catalog: PlatformDiscoveryResponse,
+  id: string,
+): boolean {
+  return catalog.capabilities.some(
+    (capability) =>
+      capability.id === id
+      && capability.transports.includes("mcp")
+      && capability.mcp_exposure !== "none",
+  );
+}
+
+function requirementAvailable(
+  requirement: ToolCapabilityRequirement | undefined,
+  available: (id: string) => boolean,
+): boolean {
+  if (requirement === undefined) return true;
+  return requirement.match === "any"
+    ? requirement.ids.some(available)
+    : requirement.ids.every(available);
+}
+
+function applyToolAvailability(
+  handles: ReadonlyMap<string, RegisteredTool>,
+  catalog: CapabilityCatalog,
+  platformCatalog: PlatformDiscoveryResponse,
+): void {
+  for (const [name, tool] of handles) {
+    const legacyAvailable = requirementAvailable(
+      LEGACY_TOOL_CAPABILITIES[name],
+      (id) => capabilityAvailable(catalog, id),
+    );
+    const platformAvailable = requirementAvailable(
+      PLATFORM_TOOL_CAPABILITIES[name],
+      (id) => platformCapabilityAvailable(platformCatalog, id),
+    );
+    setToolEnabled(tool, legacyAvailable && platformAvailable);
+  }
 }
 
 function setToolEnabled(tool: RegisteredTool, enabled: boolean): void {
@@ -2591,6 +2688,17 @@ async function guardedTool(
         true,
       );
     }
+    return await operation();
+  } catch (error) {
+    if (error instanceof StrataApiError) {
+      return toolError(error.code, error.message, error.retryable);
+    }
+    return toolError("request_failed", safeMessage(error), true);
+  }
+}
+
+async function safeTool(operation: () => Promise<CallToolResult>): Promise<CallToolResult> {
+  try {
     return await operation();
   } catch (error) {
     if (error instanceof StrataApiError) {

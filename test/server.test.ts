@@ -29,6 +29,7 @@ import type {
   PlatformOrderSubmitInput,
   PlatformOrderSubmitResponse,
   PlatformActionGraphResponse,
+  PlatformDiscoveryResponse,
   PlatformCandlesResponse,
   PlatformExecutionStatusResponse,
   PlatformMakerStatusResponse,
@@ -137,6 +138,91 @@ function catalog(
   };
 }
 
+function autonomyCatalog(): CapabilityCatalog {
+  const value = catalog(true);
+  value.capabilities.push(
+    {
+      ...value.capabilities[0]!,
+      id: "trade.submit",
+      risk: "submit",
+      mcp_exposure: "submit",
+    },
+    {
+      ...value.capabilities[0]!,
+      id: "orders.prepare",
+      risk: "prepare",
+      mcp_exposure: "prepare",
+    },
+    {
+      ...value.capabilities[0]!,
+      id: "orders.submit",
+      risk: "submit",
+      mcp_exposure: "submit",
+    },
+  );
+  return value;
+}
+
+function platformCatalog(disabled: readonly string[] = []): PlatformDiscoveryResponse {
+  const disabledIds = new Set(disabled);
+  const definitions = [
+    ["graphs.read", "read"],
+    ["platform.status.read", "read"],
+    ["rewards.read", "read"],
+    ["vault.status.read", "read"],
+    ["vault.pause", "destructive"],
+    ["market_data.candles.read", "read"],
+    ["market_data.marks.read", "read"],
+    ["quotes.market.read", "read"],
+    ["quotes.swap.read", "read"],
+    ["quotes.exact_output.read", "read"],
+    ["execution.prepare", "prepare"],
+    ["execution.submit", "submit"],
+    ["execution.status.read", "read"],
+    ["orders.prepare", "prepare"],
+    ["orders.submit", "submit"],
+    ["algos.twap.place", "submit"],
+    ["algos.twap.cancel", "destructive"],
+    ["algos.twap.read", "read"],
+    ["portfolio.read", "read"],
+    ["portfolio.history.read", "read"],
+    ["vault.setup", "submit"],
+    ["vault.deposit", "submit"],
+    ["vault.withdraw", "destructive"],
+    ["vault.delegate.manage", "destructive"],
+    ["vault.policy.manage", "destructive"],
+    ["vault.relay", "submit"],
+    ["mm.status.read", "read"],
+    ["mm.reputation.read", "read"],
+    ["mm.strand.manage", "submit"],
+    ["mm.current.manage", "submit"],
+    ["referrals.read", "read"],
+    ["referrals.link", "submit"],
+    ["referrals.claim", "submit"],
+    ["bugs.submit", "submit"],
+    ["bugs.read", "read"],
+  ] as const;
+  return {
+    schema_version: 2,
+    contract_version: "2.0",
+    server_time_ms: 1_786_550_400_000,
+    authority: {
+      permission_source: "external_agent_owner",
+      signing_location: "external",
+      accepts_private_keys: false,
+    },
+    capabilities: definitions
+      .filter(([id]) => !disabledIds.has(id))
+      .map(([id, risk]) => ({
+        id,
+        risk,
+        required_scope: "test",
+        transports: ["http", "mcp"],
+        mcp_exposure: risk === "read" ? "read" : risk === "prepare" ? "prepare" : "submit",
+      })),
+  };
+}
+
 test("MCP exposure requires every reviewed live-policy gate", () => {
   assert.equal(capabilityAvailable(catalog(true), "quotes.read"), true);
   assert.equal(capabilityAvailable(catalog(false), "quotes.read"), false);
@@ -190,6 +276,7 @@ test("initialization instructions contain the mandatory first-run safety gates",
 });
 
 test("protocol tool discovery and calls obey the current public policy", async () => {
+  let livePlatformCatalog = platformCatalog();
   let liveCatalog: CapabilityCatalog = {
     schema_version: 1,
     contract_version: CONTRACT_VERSION,
@@ -889,7 +976,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
       list: async () => platformMarketList,
     },
     discovery: {
-      read: async () => ({ server_time_ms: 1786550400000 }),
+      read: async () => livePlatformCatalog,
       graph: async () => platformGraph,
       status: async () => ({
         schema_version: 2,
@@ -1819,6 +1906,14 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_vault_withdraw",
       ],
     );
+
+    livePlatformCatalog = platformCatalog(["referrals.link", "referrals.claim"]);
+    await runtime.refreshCapabilities();
+    const platformRefreshedNames = (await protocolClient.listTools()).tools
+      .map((tool) => tool.name);
+    assert.ok(platformRefreshedNames.includes("strata_referrals"));
+    assert.ok(!platformRefreshedNames.includes("strata_referral_link"));
+    assert.ok(!platformRefreshedNames.includes("strata_referral_claim"));
   } finally {
     await protocolClient.close();
     await runtime.close();
@@ -1826,8 +1921,9 @@ test("protocol tool discovery and calls obey the current public policy", async (
 });
 
 test("session autonomy adds one-shot execute tools and a read-only slider", async () => {
+  let executedTwapAction: string | undefined;
   const fakeClient = {
-    capabilities: async () => catalog(true),
+    capabilities: async () => autonomyCatalog(),
     markets: async () => ({
       schema_version: 1,
       contract_version: CONTRACT_VERSION,
@@ -1835,7 +1931,18 @@ test("session autonomy adds one-shot execute tools and a read-only slider", asyn
     }),
   } as unknown as StrataClient;
   const fakePlatformClient = {
+    discovery: { read: async () => platformCatalog() },
     markets: { list: async () => ({ markets: [], page: { next_cursor: null, has_more: false } }) },
+    algos: {
+      execute: async (_marketId: string, request: { operation: { action: string } }) => {
+        executedTwapAction = request.operation.action;
+        return {
+          action: request.operation.action,
+          twap_control_id: "twctl_44444444444444444444444444444444",
+          signature: "1".repeat(64),
+        };
+      },
+    },
   } as unknown as StrataPlatformClient;
   const signer = {
     publicKey: "Sess1111111111111111111111111111111111111111",
@@ -1878,6 +1985,17 @@ test("session autonomy adds one-shot execute tools and a read-only slider", asyn
     assert.equal(state.session_configured, true);
     assert.equal(state.level, "instant");
     assert.equal(state.wallet_address, "Ownr1111111111111111111111111111111111111111");
+
+    const cancel = await protocolClient.callTool({
+      name: "strata_twap_execute",
+      arguments: {
+        marketId: "market_22222222222222222222222222222222",
+        action: "cancel",
+        twapId: "twap_33333333333333333333333333333333",
+      },
+    });
+    assert.equal(cancel.isError, undefined);
+    assert.equal(executedTwapAction, "cancel");
   } finally {
     await runtime.close();
   }
@@ -1886,6 +2004,7 @@ test("session autonomy adds one-shot execute tools and a read-only slider", asyn
 test("with no session the slider reports the calm ask default and no execute tools", async () => {
   const fakeClient = { capabilities: async () => catalog(true) } as unknown as StrataClient;
   const fakePlatformClient = {
+    discovery: { read: async () => platformCatalog() },
     markets: { list: async () => ({ markets: [], page: { next_cursor: null, has_more: false } }) },
   } as unknown as StrataPlatformClient;
   const runtime = await createStrataMcpServer({ client: fakeClient, platformClient: fakePlatformClient });
