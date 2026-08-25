@@ -18,6 +18,7 @@ export const SIMPLE_TOOL_NAMES = new Set([
   "strata_market_making_status",
   "strata_market_making_prepare",
   "strata_market_making_submit_and_wait",
+  "strata_market_making_intent_execute",
   "strata_autonomy",
   "strata_trade",
 ]);

@@ -37,6 +37,10 @@ import type {
   PlatformMakerControlSubmitInput,
   PlatformMakerControlSubmitResponse,
   PlatformMakerCurrentPrepareInput,
+  PlatformMakerIntentPrepareInput,
+  PlatformMakerIntentPrepareResponse,
+  PlatformMakerIntentSubmitInput,
+  PlatformMakerIntentSubmitResponse,
   PlatformMakerQuickstartPrepareInput,
   PlatformMakerQuickstartPrepared,
   PlatformMakerSubmitPreparedInput,
@@ -162,6 +166,12 @@ function autonomyCatalog(): CapabilityCatalog {
       risk: "submit",
       mcp_exposure: "submit",
     },
+    {
+      ...value.capabilities[0]!,
+      id: "mm.intent.manage",
+      risk: "submit",
+      mcp_exposure: "submit",
+    },
   );
   return value;
 }
@@ -199,6 +209,7 @@ function platformCatalog(disabled: readonly string[] = []): PlatformDiscoveryRes
     ["mm.reputation.read", "read"],
     ["mm.strand.manage", "submit"],
     ["mm.current.manage", "submit"],
+    ["mm.intent.manage", "submit"],
     ["referrals.read", "read"],
     ["referrals.link", "submit"],
     ["referrals.claim", "submit"],
@@ -350,6 +361,16 @@ test("protocol tool discovery and calls obey the current public policy", async (
         mcp_exposure: "submit",
       },
       {
+        id: "mm.intent.manage",
+        introduced_in: "1.1",
+        stability: "beta",
+        required_scope: "mm:write",
+        risk: "submit",
+        default_enabled: true,
+        public_sdk: true,
+        mcp_exposure: "submit",
+      },
+      {
         id: "mm.strand.manage",
         introduced_in: "1.1",
         stability: "beta",
@@ -419,6 +440,8 @@ test("protocol tool discovery and calls obey the current public policy", async (
   let strandSubmitRequest: PlatformMakerControlSubmitInput | undefined;
   let currentPrepareRequest: PlatformMakerCurrentPrepareInput | undefined;
   let currentSubmitRequest: PlatformMakerControlSubmitInput | undefined;
+  let intentPrepareRequest: PlatformMakerIntentPrepareInput | undefined;
+  let intentSubmitRequest: PlatformMakerIntentSubmitInput | undefined;
   let makerQuickstartPrepareRequest: PlatformMakerQuickstartPrepareInput | undefined;
   let makerQuickstartSubmitRequest: PlatformMakerSubmitPreparedInput | undefined;
   let twapChallengeRequest: PlatformTwapChallengeInput | undefined;
@@ -528,6 +551,24 @@ test("protocol tool discovery and calls obey the current public policy", async (
     action: "strand_cancel",
     signature: submitted.signature,
     status: "submitted",
+  };
+  const makerIntentPrepared: PlatformMakerIntentPrepareResponse = {
+    schema_version: 2,
+    contract_version: "2.0",
+    market_id: platformMarketId,
+    owner_wallet: makerControlPrepared.maker_wallet,
+    vault_address: "11111111111111111111111111111111",
+    session_public_key: "22222222222222222222222222222222",
+    intent_address: "33333333333333333333333333333333",
+    action: "revoke",
+    transaction_base64: "AQ==",
+    recent_blockhash: "11111111111111111111111111111111",
+    last_valid_block_height: 123,
+    expires_at_ms: 1_785_420_060_000,
+    sponsored: true,
+  };
+  const makerIntentSubmitted: PlatformMakerIntentSubmitResponse = {
+    signature: submitted.signature,
   };
   const platformGraph: PlatformActionGraphResponse = {
     schema_version: 2,
@@ -1125,6 +1166,16 @@ test("protocol tool discovery and calls obey the current public policy", async (
           };
         },
       },
+      intent: {
+        prepare: async (_marketId: string, request: PlatformMakerIntentPrepareInput) => {
+          intentPrepareRequest = request;
+          return { ...makerIntentPrepared, action: request.action };
+        },
+        submit: async (_marketId: string, request: PlatformMakerIntentSubmitInput) => {
+          intentSubmitRequest = request;
+          return makerIntentSubmitted;
+        },
+      },
       status: async (_marketId: string, maker: unknown) => {
         makerStatusRequestedFor = String(maker);
         return platformMakerStatus;
@@ -1268,6 +1319,8 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_execution_submit",
         "strata_market_making_current_prepare",
         "strata_market_making_current_submit",
+        "strata_market_making_intent_prepare",
+        "strata_market_making_intent_submit",
         "strata_market_making_prepare",
         "strata_market_making_reputation",
         "strata_market_making_status",
@@ -1962,6 +2015,27 @@ test("protocol tool discovery and calls obey the current public policy", async (
     assert.equal(currentSubmitResult.isError, undefined);
     assert.equal(currentSubmitRequest?.idempotencyKey, "current-cancel-1");
 
+    const intentPrepareResult = await protocolClient.callTool({
+      name: "strata_market_making_intent_prepare",
+      arguments: {
+        marketId: platformMarketId,
+        action: "revoke",
+        ownerWallet: makerIntentPrepared.owner_wallet,
+        sessionPublicKey: makerIntentPrepared.session_public_key,
+      },
+    });
+    assert.equal(intentPrepareResult.isError, undefined);
+    assert.equal(intentPrepareRequest?.action, "revoke");
+    const intentSubmitResult = await protocolClient.callTool({
+      name: "strata_market_making_intent_submit",
+      arguments: {
+        marketId: platformMarketId,
+        signedTransactionBase64: "AQ==",
+      },
+    });
+    assert.equal(intentSubmitResult.isError, undefined);
+    assert.equal(intentSubmitRequest?.signedTransactionBase64, "AQ==");
+
     const batchResult = await protocolClient.callTool({
       name: "strata_order_challenge",
       arguments: {
@@ -2029,6 +2103,8 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_execution_submit",
         "strata_market_making_current_prepare",
         "strata_market_making_current_submit",
+        "strata_market_making_intent_prepare",
+        "strata_market_making_intent_submit",
         "strata_market_making_prepare",
         "strata_market_making_reputation",
         "strata_market_making_status",
@@ -2083,6 +2159,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
 
 test("session autonomy adds one-shot execute tools and a read-only slider", async () => {
   let executedTwapAction: string | undefined;
+  let executedIntentAction: string | undefined;
   const fakeClient = {
     capabilities: async () => autonomyCatalog(),
     markets: async () => ({
@@ -2102,6 +2179,14 @@ test("session autonomy adds one-shot execute tools and a read-only slider", asyn
           twap_control_id: "twctl_44444444444444444444444444444444",
           signature: "1".repeat(64),
         };
+      },
+    },
+    marketMaking: {
+      intent: {
+        execute: async (_marketId: string, request: { operation: { action: string } }) => {
+          executedIntentAction = request.operation.action;
+          return { signature: "1".repeat(64) };
+        },
       },
     },
   } as unknown as StrataPlatformClient;
@@ -2133,6 +2218,7 @@ test("session autonomy adds one-shot execute tools and a read-only slider", asyn
       "strata_order_execute",
       "strata_twap_execute",
       "strata_execute_quote",
+      "strata_market_making_intent_execute",
     ]) {
       assert.ok(names.includes(expected), `expected ${expected} to be registered`);
     }
@@ -2158,6 +2244,15 @@ test("session autonomy adds one-shot execute tools and a read-only slider", asyn
     });
     assert.equal(cancel.isError, undefined);
     assert.equal(executedTwapAction, "cancel");
+    const revoke = await protocolClient.callTool({
+      name: "strata_market_making_intent_execute",
+      arguments: {
+        marketId: "market_22222222222222222222222222222222",
+        action: "revoke",
+      },
+    });
+    assert.equal(revoke.isError, undefined);
+    assert.equal(executedIntentAction, "revoke");
   } finally {
     await runtime.close();
   }

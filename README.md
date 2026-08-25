@@ -104,6 +104,7 @@ Advanced mode additionally exposes the complete protocol surface, including:
 - `strata_market_making_submit_and_wait` — submit the externally signed preparation idempotently and wait for matching chain-derived state
 - `strata_market_making_strand_prepare`, `strata_market_making_strand_submit`
 - `strata_market_making_current_prepare`, `strata_market_making_current_submit`
+- `strata_market_making_intent_prepare`, `strata_market_making_intent_submit` — control an existing curated IntentBook seat with a Vault session; Strata pays the fee
 - `strata_vault_status`
 - `strata_vault_setup`, `strata_vault_deposit`, `strata_vault_withdraw`, `strata_vault_delegate`, `strata_vault_policy`, `strata_vault_pause` — prepare owner actions with Strata as sponsored fee payer
 - `strata_vault_submit` — submit the owner-signed preparation; Strata pays and broadcasts
@@ -156,6 +157,12 @@ the two-call flow working across stateless HTTP requests or an MCP process
 restart. Use `action: "stop"` through the same pair. The older product-specific
 tools remain available for strategies that deliberately manage every low-level
 array and safety field.
+
+With a local trading session, `strata_market_making_intent_execute` posts or
+permanently revokes an existing curated IntentBook seat in one call under the
+same ask/limits/instant slider. The session signs only the SDK-verified packet;
+the owner wallet does not sign each update. Exact submit retries return the
+original confirmed signature while the packet remains live.
 
 For maker funding, initialize the market Vault if needed, activate the Strand
 or Current, then deposit with `strata_vault_deposit`. The market keeps that

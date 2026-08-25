@@ -12,6 +12,8 @@ import {
   type MarketsResponse,
   type PlatformMarket,
   type PlatformMakerCurrentPrepareInput,
+  type PlatformMakerIntentExecuteOperation,
+  type PlatformMakerIntentPrepareInput,
   type PlatformMakerQuickstartPrepared,
   type PlatformMakerStopPrepared,
   type PlatformMakerStrandPrepareInput,
@@ -261,6 +263,9 @@ const LEGACY_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapabilityRequiremen
   strata_market_making_strand_submit: { ids: ["mm.strand.manage"] },
   strata_market_making_current_prepare: { ids: ["mm.current.manage"] },
   strata_market_making_current_submit: { ids: ["mm.current.manage"] },
+  strata_market_making_intent_prepare: { ids: ["mm.intent.manage"] },
+  strata_market_making_intent_submit: { ids: ["mm.intent.manage"] },
+  strata_market_making_intent_execute: { ids: ["mm.intent.manage"] },
   strata_market_making_prepare: { ids: ["mm.strand.manage", "mm.current.manage"], match: "any" },
   strata_market_making_submit_and_wait: { ids: ["mm.strand.manage", "mm.current.manage"], match: "any" },
   strata_execute_quote: { ids: ["trade.submit"] },
@@ -305,6 +310,9 @@ const PLATFORM_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapabilityRequirem
   strata_market_making_strand_submit: { ids: ["mm.strand.manage"] },
   strata_market_making_current_prepare: { ids: ["mm.current.manage"] },
   strata_market_making_current_submit: { ids: ["mm.current.manage"] },
+  strata_market_making_intent_prepare: { ids: ["mm.intent.manage"] },
+  strata_market_making_intent_submit: { ids: ["mm.intent.manage"] },
+  strata_market_making_intent_execute: { ids: ["mm.intent.manage"] },
   strata_market_making_prepare: { ids: ["mm.strand.manage", "mm.current.manage"], match: "any" },
   strata_market_making_submit_and_wait: { ids: ["mm.strand.manage", "mm.current.manage"], match: "any" },
   strata_rewards: { ids: ["rewards.read"] },
@@ -2704,6 +2712,97 @@ export async function createStrataMcpServer(
       }),
   );
 
+  const makerIntentPrepare = registerTool(
+    "strata_market_making_intent_prepare",
+    {
+      title: "Prepare Strata IntentBook control",
+      description:
+        "Prepare one sponsored Vault-session transaction for an existing curated IntentBook seat. "
+        + "Post updates its side, price band, and maximum fill. Revoke permanently closes the seat; "
+        + "it cannot be posted again. The owner wallet does not sign each update.",
+      inputSchema: {
+        marketId: makerMarketIdSchema,
+        action: z.enum(["post", "revoke"]),
+        ownerWallet: makerPublicKeySchema,
+        sessionPublicKey: makerPublicKeySchema,
+        side: z.enum(["buy", "sell", "both"]).optional(),
+        minPriceAtoms: makerPositiveAtomicSchema.optional(),
+        maxPriceAtoms: makerPositiveAtomicSchema.optional(),
+        maxFillSizeAtoms: makerPositiveAtomicSchema.optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (args) => guardedTool(client, "mm.intent.manage", async () => {
+      let request: PlatformMakerIntentPrepareInput;
+      if (args.action === "revoke") {
+        request = {
+          action: "revoke",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+        };
+      } else {
+        if (
+          args.side === undefined
+          || args.minPriceAtoms === undefined
+          || args.maxPriceAtoms === undefined
+          || args.maxFillSizeAtoms === undefined
+        ) {
+          return toolError(
+            "invalid_request",
+            "Intent post requires side, minPriceAtoms, maxPriceAtoms, and maxFillSizeAtoms.",
+            false,
+          );
+        }
+        request = {
+          action: "post",
+          ownerWallet: args.ownerWallet,
+          sessionPublicKey: args.sessionPublicKey,
+          side: args.side,
+          minPriceAtoms: args.minPriceAtoms,
+          maxPriceAtoms: args.maxPriceAtoms,
+          maxFillSizeAtoms: args.maxFillSizeAtoms,
+        };
+      }
+      const response = await platformClient.marketMaking.intent.prepare(args.marketId, request);
+      return toolResult(
+        response,
+        `Prepared IntentBook ${response.action}; verify and add only the session signature before ${response.expires_at_ms}. Strata pays the network fee.`,
+      );
+    }),
+  );
+
+  const makerIntentSubmit = registerTool(
+    "strata_market_making_intent_submit",
+    {
+      title: "Submit Strata IntentBook control",
+      description:
+        "Submit the exact session-signed IntentBook packet. Exact retries during the packet's live "
+        + "blockhash window return the original confirmed signature.",
+      inputSchema: {
+        marketId: makerMarketIdSchema,
+        signedTransactionBase64: makerBase64Schema,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ marketId, signedTransactionBase64 }) =>
+      guardedTool(client, "mm.intent.manage", async () => {
+        const response = await platformClient.marketMaking.intent.submit(marketId, {
+          signedTransactionBase64,
+        });
+        return toolResult(response, `Submitted IntentBook control as ${response.signature}.`);
+      }),
+  );
+
   registerAutonomyTools(registerTool, client, platformClient, options.sessionAutonomy, () =>
     typeof Date !== "undefined" ? Date.now() : 0,
   );
@@ -2725,6 +2824,8 @@ export async function createStrataMcpServer(
     makerStrandSubmit,
     makerCurrentPrepare,
     makerCurrentSubmit,
+    makerIntentPrepare,
+    makerIntentSubmit,
   ];
   applyToolAvailability(registeredTools, initialCatalog, initialPlatformCatalog, toolMode);
   let closed = false;
@@ -2846,6 +2947,78 @@ function registerAutonomyTools(
   };
   const refuse = (reason: string, prepared: unknown, summary: string) =>
     toolResult({ executed: false, reason, prepared }, summary);
+
+  // ── one-shot existing IntentBook seat control ──────────────────────────────
+  registerTool(
+    "strata_market_making_intent_execute",
+    {
+      title: "Execute Strata IntentBook control",
+      description:
+        "Post or permanently revoke an existing curated IntentBook seat in one call. The configured "
+        + "Vault session verifies and signs; Strata pays the network fee. Under ask, or above a limits "
+        + "ceiling, this prepares the exact packet but does not sign it.",
+      inputSchema: {
+        marketId: makerMarketIdSchema,
+        action: z.enum(["post", "revoke"]),
+        side: z.enum(["buy", "sell", "both"]).optional(),
+        minPriceAtoms: makerPositiveAtomicSchema.optional(),
+        maxPriceAtoms: makerPositiveAtomicSchema.optional(),
+        maxFillSizeAtoms: makerPositiveAtomicSchema.optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (args) => guardedTool(client, "mm.intent.manage", async () => {
+      let operation: PlatformMakerIntentExecuteOperation;
+      if (args.action === "revoke") {
+        operation = { action: "revoke", ownerWallet: autonomy.ownerWallet };
+      } else {
+        if (
+          args.side === undefined
+          || args.minPriceAtoms === undefined
+          || args.maxPriceAtoms === undefined
+          || args.maxFillSizeAtoms === undefined
+        ) {
+          return toolError(
+            "invalid_request",
+            "Intent post requires side, minPriceAtoms, maxPriceAtoms, and maxFillSizeAtoms.",
+            false,
+          );
+        }
+        operation = {
+          action: "post",
+          ownerWallet: autonomy.ownerWallet,
+          side: args.side,
+          minPriceAtoms: args.minPriceAtoms,
+          maxPriceAtoms: args.maxPriceAtoms,
+          maxFillSizeAtoms: args.maxFillSizeAtoms,
+        };
+      }
+      const baseAtoms = operation.action === "post" ? BigInt(operation.maxFillSizeAtoms) : 0n;
+      const notional = await estimateBaseNotionalUsd(resolver, markFor, args.marketId, baseAtoms);
+      const decision = decideAutonomy(autonomy, args.marketId, notional, nowMs());
+      if (!decision.allow) {
+        const prepared = await platformClient.marketMaking.intent.prepare(args.marketId, {
+          ...operation,
+          sessionPublicKey: autonomy.signer.publicKey,
+        });
+        return refuse(decision.reason, prepared, decision.reason);
+      }
+      const receipt = await platformClient.marketMaking.intent.execute(args.marketId, {
+        operation,
+        signer: autonomy.signer,
+      });
+      if (notional !== null) autonomy.dailyBudget.record(notional, nowMs());
+      return toolResult(
+        { executed: true, receipt, notional_usd: notional },
+        `Executed IntentBook ${operation.action} as ${receipt.signature}.`,
+      );
+    }),
+  );
 
   // ── one-shot immediate execution from a fresh Sonar quote ─────────────────
   registerTool(
