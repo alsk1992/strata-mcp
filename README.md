@@ -11,6 +11,16 @@ it does **not** mean quotes are inactive.
 
 ## Local stdio
 
+Read-only use needs no wallet, key, autonomy setting, or environment variable.
+For Codex, add Strata once and start asking for markets or quotes:
+
+```sh
+codex mcp add strata -- npx -y @stratabook/mcp
+```
+
+Do not paste a session secret into chat. Session setup is optional and appears
+only when the user wants the local MCP to sign trading writes.
+
 ```sh
 npx -y @stratabook/mcp
 ```

@@ -273,6 +273,10 @@ test("readiness validates the live contract instead of reporting a shallow liven
 
 test("initialization instructions contain the mandatory first-run safety gates", () => {
   assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /Start every objective with strata_capabilities/);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /read-only tools work immediately/i);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /no wallet, approval, session key, or environment setup/i);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /never request or accept a session secret in chat/i);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /needed only when the user asks to sign a trading write/i);
   assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /strata_action_graph/);
   assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /exact input atoms/);
   assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /never private keys or seed phrases/i);
