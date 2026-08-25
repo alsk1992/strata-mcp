@@ -1,31 +1,32 @@
 # Strata MCP
 
-Official capability-gated MCP access to Strata and Sonar. The server delegates
-to `@stratabook/sdk`: it follows the live capability catalog and contains no
-separate quote or execution logic.
+Official MCP access to Strata and Sonar for every MCP-compatible client. It is
+not tied to Codex, Claude, Cursor, or any other host. The server delegates to
+`@stratabook/sdk` and follows Strata's live public policy.
 
 The official hosted endpoint currently exposes market, exact-output, and
 asset-to-asset Sonar quotes, together with quote-bound execution tools.
-Capability gating is a runtime safety check so clients stop if policy changes;
-it does **not** mean quotes are inactive.
+"Capability gated" simply means a tool disappears if Strata disables that
+operation live. It does **not** mean quotes need activation or user setup.
+
+The default tool mode is deliberately compact. Agents call the requested tool
+directly instead of burning discovery calls before a quote. Use
+`--mode advanced` (or `STRATA_MCP_MODE=advanced`) only when an integration
+needs the explicit challenge / prepare / submit protocol tools.
 
 ## Local stdio
 
-Read-only use needs no wallet, key, autonomy setting, or environment variable.
-For Codex, add Strata once and start asking for markets or quotes:
-
-```sh
-codex mcp add strata -- npx -y @stratabook/mcp
-```
-
-Do not paste a session secret into chat. Session setup is optional and appears
-only when the user wants the local MCP to sign trading writes.
+Read-only use needs no wallet, key, autonomy setting, or environment variable:
 
 ```sh
 npx -y @stratabook/mcp
 ```
 
-Example client configuration:
+Do not paste a session secret into chat. Session setup is optional and appears
+only when the user wants the local MCP to sign trading writes.
+
+Generic configuration for Claude Desktop, Cursor, Windsurf, and other
+JSON-config MCP clients:
 
 ```json
 {
@@ -38,7 +39,28 @@ Example client configuration:
 }
 ```
 
-The tools currently available are:
+Codex happens to support a one-line client-specific installer:
+
+```sh
+codex mcp add strata -- npx -y @stratabook/mcp
+```
+
+Check the whole read-only connection without placing a trade:
+
+```sh
+npx -y @stratabook/mcp doctor
+```
+
+The compact default exposes the tools ordinary users need:
+
+- `strata_markets`, `strata_marks`, `strata_book`, `strata_candles`, `strata_trades`
+- `strata_quote` — accepts `0.1 SOL`, `20 USDC`, or `$20`; token atoms remain optional
+- `strata_portfolio` and `strata_market_making_status`
+- `strata_trade` — returns a live quote when trading is not connected, with one setup link; follows the user's session limits when connected
+- `strata_market_making_prepare` and `strata_market_making_submit_and_wait`
+- `strata_autonomy` — reports whether optional trading is connected and the user's limits
+
+Advanced mode additionally exposes the complete protocol surface, including:
 
 - `strata_capabilities`
 - `strata_action_graph`
@@ -81,7 +103,8 @@ The tools currently available are:
 - `strata_order_submit`, when `orders.submit` is enabled for MCP
 - `strata_order_status`, when `orders.submit` is enabled for MCP
 
-Every initialization response carries the compact Strata Agent Harness. The
+Every initialization response carries the compact Strata Agent Harness. It
+instructs an agent to call normal read tools directly. The
 server also publishes the complete harness as the
 `strata://agent-harness/v1` resource and provides a `strata_start` prompt for
 applying it to one concrete objective.
@@ -157,7 +180,9 @@ bounded TWAP placement or cancellation, or atomic place, cancel, cancel-all,
 replace, or bounded batch order controls, and
 submit the externally signed result. It accepts
 public keys, detached signatures, and signed transactions, never private keys,
-seed phrases, or wallet secrets. Amounts are token atoms encoded as base-10
+seed phrases, or wallet secrets. Simple quote and trade tools accept exact
+decimal strings with their symbol; conversion never uses floating-point
+arithmetic. Advanced protocol fields remain token atoms encoded as base-10
 strings.
 
 Quotes default to zero tolerance. `maximumToleranceBps` is the agent's own

@@ -4,7 +4,7 @@ import type { Request, Response } from "express";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { DEFAULT_API_BASE } from "@stratabook/sdk";
+import { DEFAULT_API_BASE, StrataApiError, StrataClient } from "@stratabook/sdk";
 import {
   STRATA_ACTION_GRAPH,
   STRATA_AGENT_HARNESS,
@@ -12,9 +12,12 @@ import {
 import { createStrataMcpServer, probeStrataMcpReadiness } from "./server.js";
 import { sessionAutonomyFromEnv } from "./autonomy.js";
 import { SERVER_VERSION } from "./version.js";
+import { friendlyApiError, humanQuoteAmount, parseToolMode, type StrataMcpToolMode } from "./usability.js";
 
 interface Options {
+  command: "serve" | "doctor";
   transport: "stdio" | "http";
+  toolMode: StrataMcpToolMode;
   apiBase: string;
   timeoutMs: number;
   host: string;
@@ -23,15 +26,17 @@ interface Options {
 }
 
 function parse(argv: string[]): Options {
+  const command = argv[0] === "doctor" ? "doctor" : "serve";
+  const args = command === "doctor" ? argv.slice(1) : argv;
   const values = new Map<string, string>();
-  for (let index = 0; index < argv.length; index++) {
-    const token = argv[index];
+  for (let index = 0; index < args.length; index++) {
+    const token = args[index];
     if (token === "--help" || token === "-h") {
       help();
       process.exit(0);
     }
     if (!token?.startsWith("--")) throw new Error(`unexpected argument: ${token}`);
-    const next = argv[index + 1];
+    const next = args[index + 1];
     if (!next || next.startsWith("--")) throw new Error(`${token} requires a value`);
     values.set(token.slice(2), next);
     index++;
@@ -55,7 +60,9 @@ function parse(argv: string[]): Options {
   const host = values.get("host") ?? process.env.STRATA_MCP_HOST ?? "localhost";
   if (!/^[a-zA-Z0-9.:[\]-]+$/.test(host)) throw new Error("host is invalid");
   return {
+    command,
     transport,
+    toolMode: parseToolMode(values.get("mode") ?? process.env.STRATA_MCP_MODE),
     apiBase: values.get("api-base") ?? process.env.STRATA_API_BASE ?? DEFAULT_API_BASE,
     timeoutMs,
     host,
@@ -76,19 +83,58 @@ function help(): void {
 
 Usage:
   strata-mcp
+  strata-mcp doctor
   strata-mcp --transport http [--host localhost] [--port 8787]
 
 Options:
   --transport stdio|http   Local stdio by default; Streamable HTTP for hosting
+  --mode simple|advanced   Compact direct tools (default) or full protocol tools
   --api-base URL           Strata public API (default: ${DEFAULT_API_BASE})
   --timeout-ms N           Upstream timeout, 250..60000 (default: 10000)
   --host HOST              HTTP bind host (default: localhost)
   --port N                 HTTP port (default: 8787)
 
-This server exposes capability-gated quote and execution operations. The external
-agent owner controls permission and signing. Strata accepts public keys,
-signatures, and signed transactions, never private keys or seed phrases.
+Read-only markets, books, and Sonar quotes work immediately. Run strata-mcp
+doctor to check them. Trading setup is only needed for trading writes; connect
+it at https://stratabook.app/agents. Strata never asks for seed phrases.
 `);
+}
+
+async function runDoctor(options: Options): Promise<void> {
+  const client = new StrataClient({ apiBase: options.apiBase, timeoutMs: options.timeoutMs });
+  process.stdout.write("Strata MCP doctor\n\n");
+  try {
+    const capabilities = await client.capabilities();
+    process.stdout.write(`✓ Public API connected (contract ${capabilities.contract_version})\n`);
+    const response = await client.markets();
+    const ready = response.markets.filter((market) => market.ready);
+    process.stdout.write(`✓ ${ready.length} read-only markets available\n`);
+    const solUsdc = ready.find((market) => market.label.toUpperCase() === "SOL/USDC");
+    if (solUsdc) {
+      const amount = humanQuoteAmount(ready, solUsdc.label, "sell", "0.01 SOL");
+      const quote = await client.quote({
+        market: solUsdc.label,
+        side: "sell",
+        amountInAtoms: amount.atoms,
+      });
+      process.stdout.write(`✓ Sonar quote works (${quote.quote_id})\n`);
+    } else {
+      process.stdout.write("○ SOL/USDC is not currently listed; quote check skipped\n");
+    }
+    const sessionConfigured = Boolean(
+      process.env.STRATA_SESSION_SECRET_KEY && process.env.STRATA_OWNER_WALLET,
+    );
+    process.stdout.write(
+      sessionConfigured
+        ? "✓ Trading connection found (no transaction sent)\n"
+        : "○ Trading is not connected; read-only use is ready. Connect later at https://stratabook.app/agents\n",
+    );
+  } catch (error) {
+    if (error instanceof StrataApiError) {
+      throw new Error(friendlyApiError(error.code, error.message));
+    }
+    throw error;
+  }
 }
 
 async function runStdio(options: Options): Promise<void> {
@@ -194,6 +240,10 @@ function safeError(error: unknown): string {
 
 async function main(): Promise<void> {
   const options = parse(process.argv.slice(2));
+  if (options.command === "doctor") {
+    await runDoctor(options);
+    return;
+  }
   const sessionAutonomy = await sessionAutonomyFromEnv(process.env);
   const withSession: Options = sessionAutonomy ? { ...options, sessionAutonomy } : options;
   if (sessionAutonomy) {

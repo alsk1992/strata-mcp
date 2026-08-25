@@ -54,6 +54,7 @@ export const STRATA_AGENT_HARNESS = {
       "strata_bugs",
       "strata_bug_submit",
       "strata_quote",
+      "strata_trade",
       "strata_exact_output_quote",
       "strata_swap_quote",
       "strata_execution_challenge",
@@ -105,11 +106,11 @@ export const STRATA_AGENT_HARNESS = {
   "workflow": [
     {
       "id": "discover_capabilities",
-      "instruction": "Read the live capability catalog before every objective. Never infer permission from documentation, package support, or an earlier session."
+      "instruction": "Call the requested read-only tool directly. Read the live capability catalog only when a requested tool is unavailable, the objective is advanced or ambiguous, or the user explicitly asks what Strata supports. Never turn capability discovery into a prerequisite for a normal market, book, account, or quote request."
     },
     {
       "id": "establish_mode",
-      "instruction": "Read the compact action graph and the complete platform graph, then identify which operation and workflow nodes are live. The external agent owner configures its permissions and signer authority; static documentation never enables a Strata operation."
+      "instruction": "Use the compact default MCP tools for ordinary requests. Read the action graphs and use the advanced tool surface only for an integration that needs explicit challenge, prepare, sign, and submit control. The external agent owner configures permissions and signer authority."
     },
     {
       "id": "understand_objective",
@@ -117,7 +118,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "discover_market",
-      "instruction": "List catalog assets and markets, select currently available product identities, and use discovered decimals. Do not guess identifiers or token decimals."
+      "instruction": "Pass familiar labels such as SOL/USDC to simple tools. Call strata_markets only when the market is unknown or a low-level operation needs opaque IDs and decimals. Do not guess identifiers or token decimals."
     },
     {
       "id": "read_market_data",
@@ -173,7 +174,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "preserve_atoms",
-      "instruction": "Represent token amounts as unsigned base-10 atomic strings. Never pass settlement amounts through floating-point arithmetic."
+      "instruction": "For simple MCP tools, prefer exact human strings such as 0.1 SOL, 20 USDC, or $20; the MCP resolves decimals without floating point. For SDK and advanced tools, represent settlement amounts as unsigned base-10 atomic strings and never use floating-point arithmetic."
     },
     {
       "id": "authorize_community_actions",
@@ -181,7 +182,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "request_quote",
-      "instruction": "Request a fresh Sonar quote using either a selected market and explicit side or selected input/output asset IDs, plus exact input atoms and the execution tolerance supplied by the external agent."
+      "instruction": "Call strata_quote directly with a market label, side, and exact human amount. Use opaque asset IDs or exact atoms only for the advanced swap and protocol interfaces. The tolerance is the user's economic choice; zero is the safe default."
     },
     {
       "id": "validate_quote",
@@ -793,4 +794,4 @@ export const STRATA_ACTION_GRAPH = {
 
 export const STRATA_ACTION_GRAPH_URI = "strata://action-graph/v1";
 
-export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata read-only tools work immediately with no wallet, approval, session key, or environment setup. For market discovery, books, marks, candles, trades, quotes, public portfolios, maker status, or reputation, call the tools directly and never begin trading setup. Never request or accept a session secret in chat. A session is needed only when the user asks to sign a trading write; if it is missing, direct the user to https://stratabook.app/agents for out-of-chat setup. Revoke, withdraw, pause, and policy changes are owner-wallet actions and never use the session signer. Strata Agent Harness 1.0. Start every objective with strata_capabilities, then strata_action_graph, then strata_platform_graph, then strata_status, then strata_markets. Read strata://agent-harness/v1, strata://action-graph/v1, and strata://platform-graph/v2. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Resolve a market and side or catalog input/output asset IDs, plus exact input atoms and tolerance, before strata_quote or strata_swap_quote. When portfolio.read is live, read the owner's live Vault portfolio before sizing any action and treat null USD totals as an incomplete valuation, never as zero. When mm.status.read is live, reconcile the owner's own maker products, exposure, and dead-man guards through the authorized status read before and after every maker action, and when mm.fills.stream is live keep the official SDK's authenticated maker stream open to apply contiguous maker fills and exposure changes. For normal Strand or Current operation, prefer strata_market_making_prepare, sign only its prepared transaction externally, then pass its unchanged preparationToken with the signed transaction to strata_market_making_submit_and_wait; the token carries no signing authority and survives stateless HTTP requests. When algos.twap.stream is live, follow TWAP progress through the official SDK's sequenced TWAP stream instead of polling, and when execution.stream is live watch prepared execution handles through the sequenced execution stream. Before selecting a maker transport, read the externally authorized owner-scoped maker reputation record and follow its signed-quote eligibility, cadence, and tier-progress fields. Treat amounts as unsigned base-10 token atoms; check quote bindings, labelled fees, minimum output, and expiry. To execute or control a resting order: request a challenge, verify its quote or exact opaque order bindings, sign canonical authorization bytes externally, prepare, verify and sign the returned transaction externally, then submit with idempotency. When websocket order transport is live, prefer the official SDK persistent command stream, choose explicit self-trade prevention, keep its durable dead-man guard armed for resting exposure, and distinguish immediate RPC broadcast from pushed terminal chain status. If submission is ambiguous, recover durable status with the same control ID and idempotency key. Order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations. Stop on ambiguity, sequence gaps, unavailable capabilities, paused markets, unsupported contracts, inconsistent bindings, expiry, or missing signer authority.";
+export const STRATA_AGENT_HARNESS_INSTRUCTIONS = "Strata read-only tools work immediately with no wallet, approval, session key, or environment setup. Call the requested tool directly: use strata_quote for a quote, strata_markets only when the market is unknown, and strata_portfolio for a public account. Do not begin with capability, graph, status, or market discovery unless the requested tool is unavailable, the objective is advanced or ambiguous, or the user asks what Strata supports. Simple MCP tools accept exact human amounts such as 0.1 SOL, 20 USDC, or $20; advanced and SDK interfaces also accept token atoms. Never request or accept a session secret in chat. A session is needed only when the user asks to sign a trading write; if it is missing, strata_trade returns a read-only quote and the single setup link https://stratabook.app/agents. Revoke, withdraw, pause, and policy changes are owner-wallet actions and never use the session signer. Strata Agent Harness 1.0. The action-graph resources are optional references for advanced integrations. The external agent owner controls permission and signer authority. Strata accepts public keys, detached signatures, and signed transactions, never private keys or seed phrases. Check quote bindings, labelled fees, minimum output, price impact, tolerance, and expiry. When portfolio.read is live, read the owner's live Vault portfolio before sizing a write and treat null USD totals as an incomplete valuation, never as zero. When mm.status.read is live, reconcile the owner's maker products and exposure before and after maker actions. For normal Strand or Current operation, prefer strata_market_making_prepare, sign only its prepared transaction externally, then pass its unchanged preparationToken with the signed transaction to strata_market_making_submit_and_wait. Advanced order, TWAP, and execution integrations may use explicit challenge, prepare, verify, sign, and submit flows with idempotency. Stop on ambiguity, sequence gaps, unavailable capabilities, paused markets, inconsistent bindings, expiry, or missing signer authority.";

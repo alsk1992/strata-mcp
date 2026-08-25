@@ -44,12 +44,21 @@ import {
   STRATA_ACTION_GRAPH_URI,
 } from "./generated-harness.js";
 import { SERVER_VERSION } from "./version.js";
+import {
+  SIMPLE_TOOL_NAMES,
+  formatAtoms,
+  friendlyApiError,
+  humanQuoteAmount,
+  type StrataMcpToolMode,
+} from "./usability.js";
 
 export interface StrataMcpOptions {
   apiBase?: string;
   timeoutMs?: number;
   client?: StrataClient;
   platformClient?: StrataPlatformClient;
+  /** Compact direct-use tools by default; advanced exposes the full protocol surface. */
+  toolMode?: StrataMcpToolMode;
   /**
    * When set, the MCP may finish trades itself with this Vault session key,
    * bounded by the user-owned autonomy slider. Absent = the calm default:
@@ -238,6 +247,8 @@ type ToolCapabilityRequirement = {
 const LEGACY_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapabilityRequirement>> = {
   strata_markets: { ids: ["markets.read"] },
   strata_quote: { ids: ["quotes.read"] },
+  // Always available for a read-only preview; it only submits when a session exists.
+  strata_trade: { ids: ["quotes.read"] },
   strata_exact_output_quote: { ids: ["quotes.read"] },
   strata_execution_challenge: { ids: ["trade.prepare"] },
   strata_execution_prepare: { ids: ["trade.prepare"] },
@@ -262,6 +273,7 @@ const PLATFORM_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapabilityRequirem
   strata_candles: { ids: ["market_data.candles.read"] },
   strata_marks: { ids: ["market_data.marks.read"] },
   strata_quote: { ids: ["quotes.market.read"] },
+  strata_trade: { ids: ["quotes.market.read"] },
   strata_swap_quote: { ids: ["quotes.swap.read"] },
   strata_exact_output_quote: { ids: ["quotes.exact_output.read"] },
   strata_execution_challenge: { ids: ["execution.prepare"] },
@@ -542,6 +554,7 @@ export async function createStrataMcpServer(
   options: StrataMcpOptions = {},
 ): Promise<StrataMcpRuntime> {
   const client = strataClient(options);
+  const toolMode = options.toolMode ?? "simple";
   const platformClient = options.platformClient ?? new StrataPlatformClient({
     apiBase: options.apiBase,
     timeoutMs: options.timeoutMs,
@@ -1718,8 +1731,9 @@ export async function createStrataMcpServer(
     {
       title: "Sonar quote",
       description:
-        "Request a short-lived Sonar quote for a Strata market. Returns expected "
-        + "output, minimum output, fees, price impact, and expiry.",
+        "Request a short-lived Sonar quote. Use a market label and a human amount such as "
+        + "0.1 SOL, 20 USDC, or $20; exact input atoms remain available for advanced clients. "
+        + "Returns expected output, fees, price impact, and expiry.",
       inputSchema: {
         market: z
           .string()
@@ -1727,11 +1741,18 @@ export async function createStrataMcpServer(
           .max(128)
           .describe("Market label such as SOL/USDC, or its public market ID."),
         side: z.enum(["buy", "sell"]).describe("Buy or sell the market's base asset."),
+        amount: z
+          .string()
+          .min(1)
+          .max(64)
+          .optional()
+          .describe("Human input amount, for example 0.1 SOL, 20 USDC, or $20."),
         amountInAtoms: z
           .string()
           .regex(/^[0-9]+$/)
           .max(20)
-          .describe("Exact input amount in the input token's smallest atomic unit."),
+          .optional()
+          .describe("Advanced: exact input amount in the input token's smallest atomic unit."),
         maximumToleranceBps: z
           .number()
           .int()
@@ -1752,16 +1773,42 @@ export async function createStrataMcpServer(
         openWorldHint: true,
       },
     },
-    async ({ market, side, amountInAtoms, maximumToleranceBps }) =>
+    async ({ market, side, amount, amountInAtoms, maximumToleranceBps }) =>
       guardedTool(client, "quotes.read", async () => {
+        if ((amount === undefined) === (amountInAtoms === undefined)) {
+          return toolError(
+            "invalid_amount",
+            "Give exactly one amount: a human value such as 0.1 SOL, or amountInAtoms for advanced use.",
+            false,
+          );
+        }
+        let resolvedMarket = market;
+        let resolvedAtoms = amountInAtoms;
+        let display:
+          | { input: string; outputSymbol: string; outputDecimals: number }
+          | undefined;
+        if (amount !== undefined) {
+          try {
+            const parsed = humanQuoteAmount((await client.markets()).markets, market, side, amount);
+            resolvedMarket = parsed.market.label;
+            resolvedAtoms = parsed.atoms;
+            display = {
+              input: parsed.display,
+              outputSymbol: parsed.outputSymbol,
+              outputDecimals: parsed.outputDecimals,
+            };
+          } catch (error) {
+            return toolError("invalid_amount", safeMessage(error), false);
+          }
+        }
         const request: QuoteRequest = {
-          market,
+          market: resolvedMarket,
           side,
-          amountInAtoms,
+          amountInAtoms: resolvedAtoms!,
           maximumToleranceBps,
         };
-        const response: QuoteResponse = await client.quote(request);
-        return toolResult(response, quoteSummary(response));
+        const response: QuoteResponse = await retryReadOnce(() => client.quote(request));
+        return toolResult(response, quoteSummary(response, display));
       }),
   );
 
@@ -1818,8 +1865,116 @@ export async function createStrataMcpServer(
           amountOutAtoms,
           maximumToleranceBps,
         };
-        const response: QuoteResponse = await client.quote(request);
+        const response: QuoteResponse = await retryReadOnce(() => client.quote(request));
         return toolResult(response, quoteSummary(response));
+      }),
+  );
+
+  registerTool(
+    "strata_trade",
+    {
+      title: "Trade on Strata",
+      description:
+        "Quote and trade in one obvious tool. Human amounts such as 0.1 SOL and $20 are supported. "
+        + "Without a trading connection it returns the live read-only quote plus one setup link; "
+        + "with a session it follows the user's autonomy limits and may submit.",
+      inputSchema: {
+        market: z.string().min(1).max(128).describe("Market label, for example SOL/USDC."),
+        side: z.enum(["buy", "sell"]),
+        amount: z.string().min(1).max(64).optional()
+          .describe("Human input amount, for example 0.1 SOL, 20 USDC, or $20."),
+        amountInAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional()
+          .describe("Advanced alternative: exact input token atoms."),
+        maximumToleranceBps: z.number().int().min(0).max(1_000).optional()
+          .default(DEFAULT_MAXIMUM_TOLERANCE_BPS),
+        idempotencyKey: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ market, side, amount, amountInAtoms, maximumToleranceBps, idempotencyKey }) =>
+      guardedTool(client, "quotes.read", async () => {
+        if ((amount === undefined) === (amountInAtoms === undefined)) {
+          return toolError(
+            "invalid_amount",
+            "Give exactly one amount: a human value such as 0.1 SOL, or amountInAtoms for advanced use.",
+            false,
+          );
+        }
+        const sonarMarkets = (await client.markets()).markets;
+        let resolvedMarket = market;
+        let resolvedAtoms = amountInAtoms;
+        let inputDisplay = amountInAtoms ? `${amountInAtoms} input atoms` : amount!;
+        if (amount !== undefined) {
+          try {
+            const parsed = humanQuoteAmount(sonarMarkets, market, side, amount);
+            resolvedMarket = parsed.market.label;
+            resolvedAtoms = parsed.atoms;
+            inputDisplay = parsed.display;
+          } catch (error) {
+            return toolError("invalid_amount", safeMessage(error), false);
+          }
+        }
+        const freshQuote = await retryReadOnce(() => client.quote({
+          market: resolvedMarket,
+          side,
+          amountInAtoms: resolvedAtoms!,
+          maximumToleranceBps,
+        }));
+        if (!options.sessionAutonomy) {
+          return toolResult(
+            {
+              executed: false,
+              reason: "trading_not_connected",
+              quote: freshQuote,
+              connect_url: "https://stratabook.app/agents",
+            },
+            `Live quote ready for ${inputDisplay}; no transaction was sent. Trading is not connected. `
+              + "Open https://stratabook.app/agents when you want to trade; read-only tools need no setup.",
+          );
+        }
+        const liveCatalog = await client.capabilities();
+        if (!capabilityAvailable(liveCatalog, "trade.submit")) {
+          return toolError(
+            "trading_temporarily_unavailable",
+            "The quote works, but trading submission is temporarily unavailable. No transaction was sent.",
+            true,
+          );
+        }
+        const sonar = sonarMarkets.find((candidate) => candidate.market_pda === freshQuote.market_id)
+          ?? sonarMarkets.find((candidate) => candidate.label === resolvedMarket);
+        const notional = sonar
+          ? quoteNotionalUsd(
+              freshQuote.side,
+              freshQuote.amount_in_atoms,
+              freshQuote.minimum_output_atoms,
+              sonar.quote_decimals,
+            )
+          : null;
+        const resolver = new MarketMetaResolver(platformClient, async () => sonarMarkets, () => Date.now());
+        const marketId = sonar ? await resolver.idForLabel(sonar.label) : null;
+        const decision = decideAutonomy(options.sessionAutonomy, marketId ?? "", notional, Date.now());
+        if (!decision.allow) {
+          return toolResult(
+            { executed: false, reason: decision.reason, quote: freshQuote },
+            `${decision.reason} The live quote is attached; no transaction was sent.`,
+          );
+        }
+        const receipt = await client.executeQuote({
+          quote: freshQuote,
+          ownerWallet: options.sessionAutonomy.ownerWallet,
+          signer: options.sessionAutonomy.signer,
+          ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+        });
+        if (notional !== null) options.sessionAutonomy.dailyBudget.record(notional, Date.now());
+        return toolResult(
+          { executed: true, receipt, notional_usd: notional },
+          `Executed ${side} ${inputDisplay} as ${receipt.signature}.`,
+        );
       }),
   );
 
@@ -2571,7 +2726,7 @@ export async function createStrataMcpServer(
     makerCurrentPrepare,
     makerCurrentSubmit,
   ];
-  applyToolAvailability(registeredTools, initialCatalog, initialPlatformCatalog);
+  applyToolAvailability(registeredTools, initialCatalog, initialPlatformCatalog, toolMode);
   let closed = false;
   const refresh = async () => {
     if (closed) return;
@@ -2579,7 +2734,7 @@ export async function createStrataMcpServer(
       client.capabilities(),
       platformClient.discovery.read(),
     ]);
-    applyToolAvailability(registeredTools, catalog, platformCatalog);
+    applyToolAvailability(registeredTools, catalog, platformCatalog, toolMode);
   };
   const timer = setInterval(() => {
     refresh().catch((error: unknown) => {
@@ -2626,21 +2781,24 @@ function registerAutonomyTools(
     },
     async () => {
       const howToChange = {
-        level_env: "STRATA_AUTONOMY = ask | limits | instant",
-        per_trade_env: "STRATA_AUTONOMY_MAX_USD_PER_TRADE",
-        per_day_env: "STRATA_AUTONOMY_MAX_USD_PER_DAY",
-        markets_env: "STRATA_AUTONOMY_MARKETS (comma-separated opaque market IDs)",
-        session_env: "STRATA_SESSION_SECRET_KEY + STRATA_OWNER_WALLET (register the key on the Agents page)",
+        setup: "Open the Agents page, connect the owner wallet, register once, then copy the MCP trading config into your client's local settings.",
         agents_page: "https://stratabook.app/agents",
-        note: "Only the user changes these; an agent can offer but never raise its own level.",
+        generic_clients: "Claude Desktop, Cursor, Windsurf, Codex, or any local stdio MCP host",
+        note: "Read-only tools need none of this. Only the user changes trading authority; an agent can never raise its own level.",
+        advanced_environment_reference: {
+          level_env: "STRATA_AUTONOMY = ask | limits | instant",
+          per_trade_env: "STRATA_AUTONOMY_MAX_USD_PER_TRADE",
+          per_day_env: "STRATA_AUTONOMY_MAX_USD_PER_DAY",
+          markets_env: "STRATA_AUTONOMY_MARKETS (comma-separated opaque market IDs)",
+          session_env: "STRATA_SESSION_SECRET_KEY + STRATA_OWNER_WALLET (register the key on the Agents page)",
+        },
       };
       if (!autonomy) {
         return toolResult(
           { session_configured: false, level: "ask", how_to_change: howToChange },
-          "Autonomy: ask (no session key configured). I can prepare trades for you to sign, "
-            + "but I cannot sign any myself. To let me trade unattended, register a Vault session "
-            + "key on the Agents page and set STRATA_SESSION_SECRET_KEY (+ STRATA_OWNER_WALLET), "
-            + "then choose STRATA_AUTONOMY=limits or instant.",
+          "Read-only is ready. Trading is not connected, so I cannot send transactions. "
+            + "If you want trading, open https://stratabook.app/agents and copy its MCP trading config "
+            + "into your client; never paste the session secret into chat.",
         );
       }
       const { config } = autonomy;
@@ -2714,12 +2872,12 @@ function registerAutonomyTools(
     },
     async (args) =>
       guardedTool(client, "trade.submit", async () => {
-        const quote: QuoteResponse = await client.quote({
+        const quote: QuoteResponse = await retryReadOnce(() => client.quote({
           market: args.market,
           side: args.side,
           amountInAtoms: args.amountInAtoms,
           ...(args.toleranceBps === undefined ? {} : { toleranceBps: args.toleranceBps }),
-        });
+        }));
         const sonar = (await client.markets()).markets.find(
           (market) => market.market_pda === quote.market_id,
         );
@@ -2945,6 +3103,7 @@ function applyToolAvailability(
   handles: ReadonlyMap<string, RegisteredTool>,
   catalog: CapabilityCatalog,
   platformCatalog: PlatformDiscoveryResponse,
+  toolMode: StrataMcpToolMode,
 ): void {
   for (const [name, tool] of handles) {
     const legacyAvailable = requirementAvailable(
@@ -2955,7 +3114,8 @@ function applyToolAvailability(
       PLATFORM_TOOL_CAPABILITIES[name],
       (id) => platformCapabilityAvailable(platformCatalog, id),
     );
-    setToolEnabled(tool, legacyAvailable && platformAvailable);
+    const modeAvailable = toolMode === "advanced" || SIMPLE_TOOL_NAMES.has(name);
+    setToolEnabled(tool, modeAvailable && legacyAvailable && platformAvailable);
   }
 }
 
@@ -2981,7 +3141,7 @@ async function guardedTool(
     return await operation();
   } catch (error) {
     if (error instanceof StrataApiError) {
-      return toolError(error.code, error.message, error.retryable);
+      return toolError(error.code, friendlyApiError(error.code, error.message), error.retryable);
     }
     return toolError("request_failed", safeMessage(error), true);
   }
@@ -2992,9 +3152,20 @@ async function safeTool(operation: () => Promise<CallToolResult>): Promise<CallT
     return await operation();
   } catch (error) {
     if (error instanceof StrataApiError) {
-      return toolError(error.code, error.message, error.retryable);
+      return toolError(error.code, friendlyApiError(error.code, error.message), error.retryable);
     }
     return toolError("request_failed", safeMessage(error), true);
+  }
+}
+
+/** Retry an idempotent public read once; trading writes are deliberately never retried here. */
+async function retryReadOnce<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!(error instanceof StrataApiError) || !error.retryable) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return operation();
   }
 }
 
@@ -3002,7 +3173,19 @@ async function safeTool(operation: () => Promise<CallToolResult>): Promise<CallT
  * One line that keeps the two numbers apart: price impact is measured from the
  * book; the tolerance is the caller's own floor.
  */
-function quoteSummary(response: QuoteResponse): string {
+function quoteSummary(
+  response: QuoteResponse,
+  display?: { input: string; outputSymbol: string; outputDecimals: number },
+): string {
+  if (display) {
+    const output = `${formatAtoms(response.amount_out_atoms, display.outputDecimals)} ${display.outputSymbol}`;
+    const minimum = `${formatAtoms(response.minimum_output_atoms, display.outputDecimals)} ${display.outputSymbol}`;
+    return (
+      `Sonar ${response.side} quote: ${display.input} → about ${output}; minimum ${minimum}; `
+      + `price impact ${response.price_impact_pct}%; tolerance ${response.maximum_tolerance_bps} bps. `
+      + `This is a read-only quote and expires at ${response.expires_at_ms}.`
+    );
+  }
   return (
     `Sonar ${response.side} quote: ${response.amount_in_consumed_atoms} input atoms for `
     + `${response.amount_out_atoms} user-net output atoms; price impact ${response.price_impact_pct}% `
