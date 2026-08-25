@@ -3,6 +3,19 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.13
+
+- Add `strata-mcp connect`: generate the session secret locally, open the
+  owner-wallet registration page with only its public key, verify activation,
+  and save a mode-0600 local credential. No secret copying, chat, config-file,
+  or environment-variable setup is required.
+- Add `strata-mcp disconnect` for exact-session on-chain revocation followed
+  by local credential removal.
+- Automatically load the private local connection for MCP and `doctor`, while
+  preserving explicit environment variables for managed deployments.
+- Keep read-only tools immediate and client-neutral, and document hosted HTTP,
+  Cursor, Claude Code, Codex, Windsurf, and generic stdio installation.
+
 ## 0.2.12
 
 - Make MCP client-neutral: the primary setup works with any stdio or
