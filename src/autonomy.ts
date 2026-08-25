@@ -17,8 +17,9 @@
  *                 caps (the owner's per-asset limits, tolerance, interval,
  *                 expiry). Hyperliquid-style.
  *
- * Withdraw, policy, pause, and revoke are never on this slider — they always
- * require the owner's wallet. The on-chain session caps are the hard ceiling;
+ * Vault withdrawal, policy, session rotation, and pause are never on this
+ * slider — they always require the owner's wallet. An IntentBook seat's own
+ * session-authorized revoke remains available as its permanent risk exit. The on-chain session caps are the hard ceiling;
  * this slider is a softer layer above them. An agent can *read* the level
  * (`strata_autonomy`) and *offer* to change it, but nothing an agent calls can
  * raise its own autonomy: the only knob is the human's (env / Agents page).

@@ -3,6 +3,13 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.15
+
+- Add explicit IntentBook prepare/submit tools in advanced mode and a one-call
+  post/permanent-revoke tool for locally configured Vault sessions.
+- Apply the existing ask/limits/instant slider, USD budgets, capability gates,
+  exact retry behavior, and sponsored-fee explanation to intent controls.
+
 ## 0.2.14
 
 - Make `strata-mcp connect` the complete client-neutral trading setup flow:
