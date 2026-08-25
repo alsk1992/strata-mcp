@@ -22,8 +22,22 @@ Read-only use needs no wallet, key, autonomy setting, or environment variable:
 npx -y @stratabook/mcp
 ```
 
-Do not paste a session secret into chat. Session setup is optional and appears
-only when the user wants the local MCP to sign trading writes.
+Trading setup is optional. When needed, the local MCP generates its own key,
+opens the owner-wallet page, and saves the secret in a mode-0600 local file.
+The browser and Strata receive only the public key:
+
+```sh
+npx -y @stratabook/mcp connect
+```
+
+There is no secret to paste into chat, no environment-variable screen, and no
+client config to edit after the read-only server is installed. Restart or
+refresh the MCP client after the browser confirms connection. Revoke the exact
+session and delete its local credential with:
+
+```sh
+npx -y @stratabook/mcp disconnect
+```
 
 Generic configuration for Claude Desktop, Cursor, Windsurf, and other
 JSON-config MCP clients:
@@ -50,6 +64,10 @@ Check the whole read-only connection without placing a trade:
 ```sh
 npx -y @stratabook/mcp doctor
 ```
+
+The private credential defaults to `~/.config/strata/mcp.json` on macOS/Linux
+and `%APPDATA%\Strata\mcp.json` on Windows. Override it with
+`STRATA_MCP_CREDENTIALS_FILE` when a managed secret volume is required.
 
 The compact default exposes the tools ordinary users need:
 

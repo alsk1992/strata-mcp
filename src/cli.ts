@@ -13,27 +13,45 @@ import { createStrataMcpServer, probeStrataMcpReadiness } from "./server.js";
 import { sessionAutonomyFromEnv } from "./autonomy.js";
 import { SERVER_VERSION } from "./version.js";
 import { friendlyApiError, humanQuoteAmount, parseToolMode, type StrataMcpToolMode } from "./usability.js";
+import {
+  DEFAULT_PAIRING_WEB_BASE,
+  loadTradingEnvironment,
+  runLocalPairing,
+  tradingCredentialsPath,
+} from "./pairing.js";
 
 interface Options {
-  command: "serve" | "doctor";
+  command: "serve" | "doctor" | "connect" | "disconnect";
   transport: "stdio" | "http";
   toolMode: StrataMcpToolMode;
   apiBase: string;
   timeoutMs: number;
   host: string;
   port: number;
+  openBrowser: boolean;
+  webBase: string;
+  credentialsFile?: string;
   sessionAutonomy?: NonNullable<Awaited<ReturnType<typeof sessionAutonomyFromEnv>>>;
 }
 
 function parse(argv: string[]): Options {
-  const command = argv[0] === "doctor" ? "doctor" : "serve";
-  const args = command === "doctor" ? argv.slice(1) : argv;
+  const knownCommands = new Set(["doctor", "connect", "disconnect"] as const);
+  const first = argv[0];
+  const command: Options["command"] = first && knownCommands.has(first as "doctor")
+    ? first as "doctor" | "connect" | "disconnect"
+    : "serve";
+  const args = command === "serve" ? argv : argv.slice(1);
   const values = new Map<string, string>();
+  let openBrowser = true;
   for (let index = 0; index < args.length; index++) {
     const token = args[index];
     if (token === "--help" || token === "-h") {
       help();
       process.exit(0);
+    }
+    if (token === "--no-open") {
+      openBrowser = false;
+      continue;
     }
     if (!token?.startsWith("--")) throw new Error(`unexpected argument: ${token}`);
     const next = args[index + 1];
@@ -67,6 +85,11 @@ function parse(argv: string[]): Options {
     timeoutMs,
     host,
     port,
+    openBrowser,
+    webBase: values.get("web-base") ?? process.env.STRATA_MCP_WEB_BASE ?? DEFAULT_PAIRING_WEB_BASE,
+    ...(values.get("credentials-file") === undefined
+      ? {}
+      : { credentialsFile: values.get("credentials-file") }),
   };
 }
 
@@ -84,6 +107,8 @@ function help(): void {
 Usage:
   strata-mcp
   strata-mcp doctor
+  strata-mcp connect
+  strata-mcp disconnect
   strata-mcp --transport http [--host localhost] [--port 8787]
 
 Options:
@@ -93,14 +118,20 @@ Options:
   --timeout-ms N           Upstream timeout, 250..60000 (default: 10000)
   --host HOST              HTTP bind host (default: localhost)
   --port N                 HTTP port (default: 8787)
+  --credentials-file PATH  Override the private local trading credential file
+  --no-open                Print the wallet pairing URL without opening a browser
 
 Read-only markets, books, and Sonar quotes work immediately. Run strata-mcp
-doctor to check them. Trading setup is only needed for trading writes; connect
-it at https://stratabook.app/agents. Strata never asks for seed phrases.
+doctor to check them. Run strata-mcp connect once to register a local session
+with the owner wallet; there are no secrets to copy or environment variables
+to edit. Run strata-mcp disconnect to revoke it. Strata never asks for seed phrases.
 `);
 }
 
-async function runDoctor(options: Options): Promise<void> {
+async function runDoctor(
+  options: Options,
+  sessionEnv: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
   const client = new StrataClient({ apiBase: options.apiBase, timeoutMs: options.timeoutMs });
   process.stdout.write("Strata MCP doctor\n\n");
   try {
@@ -122,12 +153,12 @@ async function runDoctor(options: Options): Promise<void> {
       process.stdout.write("○ SOL/USDC is not currently listed; quote check skipped\n");
     }
     const sessionConfigured = Boolean(
-      process.env.STRATA_SESSION_SECRET_KEY && process.env.STRATA_OWNER_WALLET,
+      sessionEnv.STRATA_SESSION_SECRET_KEY && sessionEnv.STRATA_OWNER_WALLET,
     );
     process.stdout.write(
       sessionConfigured
         ? "✓ Trading connection found (no transaction sent)\n"
-        : "○ Trading is not connected; read-only use is ready. Connect later at https://stratabook.app/agents\n",
+        : "○ Trading is not connected; read-only use is ready. Run strata-mcp connect when needed.\n",
     );
   } catch (error) {
     if (error instanceof StrataApiError) {
@@ -240,16 +271,28 @@ function safeError(error: unknown): string {
 
 async function main(): Promise<void> {
   const options = parse(process.argv.slice(2));
-  if (options.command === "doctor") {
-    await runDoctor(options);
+  if (options.command === "connect" || options.command === "disconnect") {
+    await runLocalPairing({
+      action: options.command,
+      webBase: options.webBase,
+      apiBase: options.apiBase,
+      openBrowser: options.openBrowser,
+      ...(options.credentialsFile === undefined ? {} : { credentialsFile: options.credentialsFile }),
+    });
     return;
   }
-  const sessionAutonomy = await sessionAutonomyFromEnv(process.env);
+  const sessionEnv = await loadTradingEnvironment(process.env);
+  if (options.command === "doctor") {
+    await runDoctor(options, sessionEnv);
+    return;
+  }
+  const sessionAutonomy = await sessionAutonomyFromEnv(sessionEnv);
   const withSession: Options = sessionAutonomy ? { ...options, sessionAutonomy } : options;
   if (sessionAutonomy) {
     process.stderr.write(
       `[strata-mcp] session autonomy: ${sessionAutonomy.config.level} `
-        + `(wallet ${sessionAutonomy.ownerWallet.slice(0, 6)}…, session ${sessionAutonomy.signer.publicKey.slice(0, 6)}…)\n`,
+        + `(wallet ${sessionAutonomy.ownerWallet.slice(0, 6)}…, session ${sessionAutonomy.signer.publicKey.slice(0, 6)}…, `
+        + `credentials ${process.env.STRATA_SESSION_SECRET_KEY ? "environment" : tradingCredentialsPath(process.env)})\n`,
     );
   }
   if (withSession.transport === "stdio") await runStdio(withSession);
