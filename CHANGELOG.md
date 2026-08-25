@@ -3,6 +3,15 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.11
+
+- Consume the exact TypeScript SDK 0.2.11 release containing the installed
+  maker-conformance CLI entrypoint fix.
+- Make the zero-credential read-only path explicit in MCP initialization:
+  markets, books, marks, candles, trades, quotes, public portfolios, and maker
+  reads work immediately. Agents must not request session secrets in chat or
+  begin write onboarding unless the user asks to trade.
+
 ## 0.2.10
 
 - Consume the matching SDK conformance release. The safe deployment gate now
