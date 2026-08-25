@@ -30,6 +30,11 @@ The browser and Strata receive only the public key:
 npx -y @stratabook/mcp connect
 ```
 
+This opens the client-neutral Strata limit picker, registers the locally
+generated key with one wallet signature, saves the credential privately, and
+returns to the live Control Center. Run the same command again to replace the
+old key atomically; the old key is revoked in the same signed transaction.
+
 There is no secret to paste into chat, no environment-variable screen, and no
 client config to edit after the read-only server is installed. Restart or
 refresh the MCP client after the browser confirms connection. Revoke the exact

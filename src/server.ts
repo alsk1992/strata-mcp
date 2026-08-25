@@ -736,7 +736,7 @@ export async function createStrataMcpServer(
       const response = await platformClient.marketMaking.status(marketId, walletAddress);
       return toolResult(
         response,
-        `${response.active_products} active maker products; reconcile intent, Strand, Current, signed-quote, and dead-man state before changing exposure.`,
+        `${response.active_products} active maker products; reconcile Strand, Current, signed-quote, and dead-man state before changing exposure.`,
       );
     },
   );

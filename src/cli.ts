@@ -122,9 +122,10 @@ Options:
   --no-open                Print the wallet pairing URL without opening a browser
 
 Read-only markets, books, and Sonar quotes work immediately. Run strata-mcp
-doctor to check them. Run strata-mcp connect once to register a local session
-with the owner wallet; there are no secrets to copy or environment variables
-to edit. Run strata-mcp disconnect to revoke it. Strata never asks for seed phrases.
+doctor to check them. Run strata-mcp connect to choose limits and register a
+local session with one owner signature; run it again to replace that session
+atomically. There are no secrets to copy or environment variables to edit.
+Run strata-mcp disconnect to revoke it. Strata never asks for seed phrases.
 `);
 }
 

@@ -6,10 +6,30 @@ import test from "node:test";
 import { generateSessionKeypair } from "@stratabook/sdk";
 import {
   loadTradingEnvironment,
+  pairingPageUrl,
   readTradingConnection,
   tradingCredentialsPath,
   writeTradingConnection,
 } from "../src/pairing.js";
+
+test("replacement URLs bind the old public key and its owner without exposing a secret", () => {
+  const url = new URL(pairingPageUrl(
+    "https://stratabook.app",
+    "connect",
+    "22222222222222222222222222222222",
+    "http://127.0.0.1:43123/complete/0123456789abcdef0123456789abcdef0123456789abcdef",
+    {
+      owner_wallet: "11111111111111111111111111111111",
+      session_public_key: "33333333333333333333333333333333",
+    },
+  ));
+  assert.equal(url.pathname, "/agents");
+  assert.equal(url.searchParams.get("pair"), "connect");
+  assert.equal(url.searchParams.get("owner_wallet"), "11111111111111111111111111111111");
+  assert.equal(url.searchParams.get("session_public_key"), "22222222222222222222222222222222");
+  assert.equal(url.searchParams.get("replace_session_public_key"), "33333333333333333333333333333333");
+  assert.doesNotMatch(url.toString(), /secret/i);
+});
 
 test("credential paths follow each platform and allow an explicit override", () => {
   assert.equal(

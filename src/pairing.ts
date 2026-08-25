@@ -156,17 +156,22 @@ function launchBrowser(url: string): void {
   child.unref();
 }
 
-function successHtml(action: PairingAction, wallet: string): string {
-  const connected = action === "connect";
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
-<title>Strata agent ${connected ? "connected" : "disconnected"}</title>
-<style>html{color-scheme:dark}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#080b11;color:#e2e8f0;font:15px Inter,system-ui,sans-serif}.card{width:min(520px,calc(100% - 48px));padding:28px;border:1px solid transparent;border-radius:16px;background:linear-gradient(#10141c,#090c12) padding-box,linear-gradient(120deg,#22d3ee,#8b5cf6) border-box;box-shadow:0 22px 80px #0008}h1{margin:0 0 10px;color:white;font-size:24px}p{line-height:1.55;color:#94a3b8}.ok{color:#34d399;font-weight:700}.mono{font-family:ui-monospace,monospace;color:#cbd5e1}</style>
-</head><body><main class="card"><div class="ok">${connected ? "CONNECTED" : "REVOKED"}</div>
-<h1>${connected ? "Your agent can trade" : "Agent access removed"}</h1>
-<p>${connected ? "The session secret was saved only on this computer. Restart or refresh your MCP client, then trade normally." : "The local trading credential has been removed. Read-only Strata tools still work."}</p>
-<p class="mono">Wallet ${wallet.slice(0, 6)}…${wallet.slice(-6)}</p></main></body></html>`;
+export function pairingPageUrl(
+  webBase: string,
+  action: PairingAction,
+  sessionPublicKey: string,
+  callbackUrl: string,
+  existing: Pick<StoredTradingConnection, "owner_wallet" | "session_public_key"> | null,
+): string {
+  const agentUrl = new URL("/agents", pairingWebBase(webBase));
+  agentUrl.searchParams.set("pair", action);
+  agentUrl.searchParams.set("session_public_key", sessionPublicKey);
+  if (existing) agentUrl.searchParams.set("owner_wallet", existing.owner_wallet);
+  if (action === "connect" && existing) {
+    agentUrl.searchParams.set("replace_session_public_key", existing.session_public_key);
+  }
+  agentUrl.searchParams.set("callback", callbackUrl);
+  return agentUrl.toString();
 }
 
 async function waitForOnChainSession(
@@ -174,32 +179,40 @@ async function waitForOnChainSession(
   action: PairingAction,
   ownerWallet: string,
   sessionPublicKey: string,
+  replaceSessionPublicKey: string | null,
 ): Promise<void> {
   const deadline = Date.now() + 60_000;
   let lastState = "unavailable";
+  const stateFor = async (key: string): Promise<string | null> => {
+    const query = new URLSearchParams({
+      wallet_address: ownerWallet,
+      session_public_key: key,
+    });
+    const response = await fetch(
+      `${apiBase.replace(/\/$/, "")}/v2/vault/status?${query.toString()}`,
+      { headers: { accept: "application/json" }, signal: AbortSignal.timeout(10_000) },
+    );
+    if (!response.ok) {
+      lastState = `http_${response.status}`;
+      return null;
+    }
+    const body = await response.json() as {
+      wallet_address?: unknown;
+      session?: { session_public_key?: unknown; state?: unknown } | null;
+    };
+    if (body.wallet_address !== ownerWallet) return null;
+    if (!body.session) return "absent";
+    if (body.session.session_public_key !== key || typeof body.session.state !== "string") return null;
+    return body.session.state;
+  };
   while (Date.now() < deadline) {
     try {
-      const query = new URLSearchParams({
-        wallet_address: ownerWallet,
-        session_public_key: sessionPublicKey,
-      });
-      const response = await fetch(
-        `${apiBase.replace(/\/$/, "")}/v2/vault/status?${query.toString()}`,
-        { headers: { accept: "application/json" }, signal: AbortSignal.timeout(10_000) },
-      );
-      if (response.ok) {
-        const body = await response.json() as {
-          wallet_address?: unknown;
-          session?: { session_public_key?: unknown; state?: unknown } | null;
-        };
-        if (body.wallet_address === ownerWallet) {
-          lastState = typeof body.session?.state === "string" ? body.session.state : "absent";
-          const exactSession = body.session?.session_public_key === sessionPublicKey;
-          if (action === "connect" && exactSession && body.session?.state === "active") return;
-          if (action === "disconnect" && (!body.session || (exactSession && body.session.state === "absent"))) return;
-        }
-      } else {
-        lastState = `http_${response.status}`;
+      const state = await stateFor(sessionPublicKey);
+      lastState = state ?? lastState;
+      if (action === "disconnect" && state === "absent") return;
+      if (action === "connect" && state === "active") {
+        if (!replaceSessionPublicKey || await stateFor(replaceSessionPublicKey) === "absent") return;
+        lastState = "old_session_still_active";
       }
     } catch (error) {
       lastState = error instanceof Error ? error.name : "unavailable";
@@ -213,9 +226,9 @@ async function waitForOnChainSession(
 }
 
 async function waitForPairingCallback(
-  action: PairingAction,
   sessionPublicKey: string,
   state: string,
+  returnUrl: string,
   onComplete: (ownerWallet: string) => Promise<void>,
 ): Promise<{ callbackUrl: string; completion: Promise<string> }> {
   let settle!: (ownerWallet: string) => void;
@@ -247,13 +260,13 @@ async function waitForPairingCallback(
     finished = true;
     try {
       await onComplete(ownerWallet);
-      response.writeHead(200, {
-        "content-type": "text/html; charset=utf-8",
+      response.writeHead(303, {
+        location: returnUrl,
         "cache-control": "no-store",
         "x-content-type-options": "nosniff",
         "x-frame-options": "DENY",
       });
-      response.end(successHtml(action, ownerWallet));
+      response.end();
       settle(ownerWallet);
     } catch (error) {
       response.writeHead(500, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
@@ -294,18 +307,12 @@ export async function runLocalPairing(options: PairingOptions): Promise<void> {
   const env = options.env ?? process.env;
   const path = options.credentialsFile ?? tradingCredentialsPath(env);
   const existing = await readTradingConnection(path);
-  if (options.action === "connect" && existing) {
-    throw new Error(
-      `Trading is already connected for wallet ${existing.owner_wallet}. `
-      + "Run strata-mcp disconnect before replacing this session.",
-    );
-  }
   if (options.action === "disconnect" && !existing) {
     process.stdout.write("Strata trading is not connected. Read-only tools remain ready.\n");
     return;
   }
   let generated: StoredTradingConnection;
-  if (existing) {
+  if (options.action === "disconnect" && existing) {
     generated = existing;
   } else {
     const keypair = await generateSessionKeypair();
@@ -319,16 +326,23 @@ export async function runLocalPairing(options: PairingOptions): Promise<void> {
     };
   }
   const state = randomBytes(24).toString("hex");
+  const webBase = pairingWebBase(options.webBase ?? DEFAULT_PAIRING_WEB_BASE);
+  const returnUrl = new URL("/agents", webBase);
+  returnUrl.searchParams.set("paired", options.action === "connect" ? "connected" : "revoked");
+  const replaceSessionPublicKey = options.action === "connect"
+    ? existing?.session_public_key ?? null
+    : null;
   const callback = await waitForPairingCallback(
-    options.action,
     generated.session_public_key,
     state,
+    returnUrl.toString(),
     async (ownerWallet) => {
       await waitForOnChainSession(
         options.apiBase ?? DEFAULT_API_BASE,
         options.action,
         ownerWallet,
         generated.session_public_key,
+        replaceSessionPublicKey,
       );
       if (options.action === "disconnect") {
         if (existing?.owner_wallet !== ownerWallet) {
@@ -344,15 +358,17 @@ export async function runLocalPairing(options: PairingOptions): Promise<void> {
       }, path);
     },
   );
-  const webBase = pairingWebBase(options.webBase ?? DEFAULT_PAIRING_WEB_BASE);
-  const agentUrl = new URL("/agents", webBase);
-  agentUrl.searchParams.set("pair", options.action);
-  agentUrl.searchParams.set("session_public_key", generated.session_public_key);
-  agentUrl.searchParams.set("callback", callback.callbackUrl);
-  process.stdout.write(
-    `${options.action === "connect" ? "Connect" : "Revoke"} Strata agent access in your browser:\n${agentUrl.toString()}\n\n`,
+  const agentUrl = pairingPageUrl(
+    webBase,
+    options.action,
+    generated.session_public_key,
+    callback.callbackUrl,
+    existing,
   );
-  if (options.openBrowser !== false) launchBrowser(agentUrl.toString());
+  process.stdout.write(
+    `${options.action === "disconnect" ? "Revoke" : replaceSessionPublicKey ? "Replace" : "Connect"} Strata agent access in your browser:\n${agentUrl}\n\n`,
+  );
+  if (options.openBrowser !== false) launchBrowser(agentUrl);
   process.stdout.write("Waiting for the owner-wallet signature…\n");
   const ownerWallet = await callback.completion;
   process.stdout.write(

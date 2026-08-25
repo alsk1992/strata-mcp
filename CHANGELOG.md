@@ -3,6 +3,16 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.14
+
+- Make `strata-mcp connect` the complete client-neutral trading setup flow:
+  choose limits in Strata, sign once, save the secret locally, and return to a
+  confirmed connected Control Center without environment variables or config
+  editing.
+- Re-running `connect` now rotates an existing local session atomically, and
+  saves the new credential only after both activation and old-key revocation
+  are confirmed.
+
 ## 0.2.13
 
 - Add `strata-mcp connect`: generate the session secret locally, open the

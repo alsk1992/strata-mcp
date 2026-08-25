@@ -809,6 +809,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
     server_time_ms: 1_785_420_000_000,
     wallet_address: walletAddress,
     session_public_key: "9Uu7cLBgfMk233BAjMvTS8XJy6KbZK7oQ7NXuCTi3Fg2",
+    replace_session_public_key: null,
     market_id: "market_33333333333333333333333333333333",
     mode: "create",
     expires_at_ms: null,
