@@ -3,6 +3,17 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.12
+
+- Make MCP client-neutral: the primary setup works with any stdio or
+  Streamable HTTP MCP host; Codex is only one optional client example.
+- Replace the forced discovery preamble with direct read-only tool use and a
+  compact 12-tool default. `--mode advanced` retains the complete protocol.
+- Accept exact human quote and trade amounts such as `0.1 SOL`, `20 USDC`, and
+  `$20`, resolving market labels and decimals without floating point.
+- Add progressive `strata_trade`, `strata-mcp doctor`, one safe transient quote
+  retry, and plain next steps for common failures.
+
 ## 0.2.11
 
 - Consume the exact TypeScript SDK 0.2.11 release containing the installed

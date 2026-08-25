@@ -271,14 +271,15 @@ test("readiness validates the live contract instead of reporting a shallow liven
   );
 });
 
-test("initialization instructions contain the mandatory first-run safety gates", () => {
-  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /Start every objective with strata_capabilities/);
+test("initialization instructions make read-only use direct and reserve setup for writes", () => {
+  assert.doesNotMatch(STRATA_AGENT_HARNESS_INSTRUCTIONS, /Start every objective with strata_capabilities/);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /Call the requested tool directly/);
   assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /read-only tools work immediately/i);
   assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /no wallet, approval, session key, or environment setup/i);
   assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /never request or accept a session secret in chat/i);
   assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /needed only when the user asks to sign a trading write/i);
-  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /strata_action_graph/);
-  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /exact input atoms/);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /advanced or ambiguous/);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /0\.1 SOL/);
   assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /never private keys or seed phrases/i);
 });
 
@@ -1207,6 +1208,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
   const runtime = await createStrataMcpServer({
     client: fakeClient,
     platformClient: fakePlatformClient,
+    toolMode: "advanced",
   });
   const protocolClient = new Client({ name: "strata-mcp-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -1243,7 +1245,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
       name: "strata_start",
       arguments: { objective: "Quote selling 0.1 SOL for USDC." },
     });
-    assert.match(JSON.stringify(start.messages), /strata_capabilities/);
+    assert.match(JSON.stringify(start.messages), /Call the requested tool directly/);
     assert.match(JSON.stringify(start.messages), /Quote selling 0.1 SOL/);
 
     const initial = await protocolClient.listTools();
@@ -1287,6 +1289,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_rewards",
         "strata_status",
         "strata_swap_quote",
+        "strata_trade",
         "strata_trades",
         "strata_twap_cancel",
         "strata_twap_challenge",
@@ -1493,6 +1496,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
     const restartedRuntime = await createStrataMcpServer({
       client: fakeClient,
       platformClient: fakePlatformClient,
+      toolMode: "advanced",
     });
     const restartedClient = new Client({ name: "strata-mcp-restart-test", version: "1.0.0" });
     const [restartedClientTransport, restartedServerTransport] =
@@ -1753,6 +1757,19 @@ test("protocol tool discovery and calls obey the current public policy", async (
     });
     assert.equal(quoteResult.isError, undefined);
     assert.equal(quoteRequest?.maximumToleranceBps, 0);
+
+    const humanQuoteResult = await protocolClient.callTool({
+      name: "strata_quote",
+      arguments: {
+        market: "sol-usdc",
+        side: "sell",
+        amount: "0.1 SOL",
+      },
+    });
+    assert.equal(humanQuoteResult.isError, undefined);
+    assert.equal(quoteRequest?.market, "SOL/USDC");
+    assert.equal(quoteRequest?.amountInAtoms, "100000000");
+    assert.match(JSON.stringify(humanQuoteResult.content), /0\.1 SOL/);
 
     const exactOutputResult = await protocolClient.callTool({
       name: "strata_exact_output_quote",
@@ -2095,6 +2112,7 @@ test("session autonomy adds one-shot execute tools and a read-only slider", asyn
   const runtime = await createStrataMcpServer({
     client: fakeClient,
     platformClient: fakePlatformClient,
+    toolMode: "advanced",
     sessionAutonomy: {
       signer,
       ownerWallet: "Ownr1111111111111111111111111111111111111111",
@@ -2144,8 +2162,44 @@ test("session autonomy adds one-shot execute tools and a read-only slider", asyn
   }
 });
 
-test("with no session the slider reports the calm ask default and no execute tools", async () => {
-  const fakeClient = { capabilities: async () => catalog(true) } as unknown as StrataClient;
+test("the default surface stays compact and reports trading as optional", async () => {
+  const defaultMarkets: MarketsResponse = {
+    schema_version: 1,
+    contract_version: CONTRACT_VERSION,
+    markets: [{
+      base: "So11111111111111111111111111111111111111112",
+      quote: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      market_pda: "G3uTbTDGFQrNwdvDNSCu2rQbSx4Ujfm75vgUdENR8h4J",
+      label: "SOL/USDC",
+      ready: true,
+      base_decimals: 9,
+      quote_decimals: 6,
+      quote_path: "/sonar/markets/sol-usdc/quote",
+    }],
+  };
+  const fakeClient = {
+    capabilities: async () => catalog(true),
+    markets: async () => defaultMarkets,
+    quote: async () => ({
+      schema_version: 1,
+      contract_version: CONTRACT_VERSION,
+      quote_id: "sq_0123456789abcdef0123456789abcdef",
+      server_time_ms: 1,
+      expires_at_ms: 2,
+      market_id: defaultMarkets.markets[0]!.market_pda!,
+      side: "sell",
+      amount_in_atoms: "100000000",
+      amount_in_consumed_atoms: "100000000",
+      amount_out_atoms: "15000000",
+      minimum_output_atoms: "15000000",
+      input_fee_atoms: "0",
+      output_fee_atoms: "0",
+      maximum_tolerance_bps: 0,
+      reference_price: "150",
+      price_impact_pct: "0.01",
+      provider: "Sonar",
+    } satisfies QuoteResponse),
+  } as unknown as StrataClient;
   const fakePlatformClient = {
     discovery: { read: async () => platformCatalog() },
     markets: { list: async () => ({ markets: [], page: { next_cursor: null, has_more: false } }) },
@@ -2158,11 +2212,22 @@ test("with no session the slider reports the calm ask default and no execute too
     await protocolClient.connect(clientTransport);
     const names = (await protocolClient.listTools()).tools.map((tool) => tool.name);
     assert.ok(names.includes("strata_autonomy"));
+    assert.ok(names.includes("strata_trade"));
+    assert.ok(!names.includes("strata_capabilities"));
+    assert.ok(!names.includes("strata_exact_output_quote"));
+    assert.ok(!names.includes("strata_order_execute"));
     assert.ok(!names.includes("strata_order_execute"));
     const read = await protocolClient.callTool({ name: "strata_autonomy", arguments: {} });
     const state = read.structuredContent as Record<string, unknown>;
     assert.equal(state.session_configured, false);
     assert.equal(state.level, "ask");
+    const preview = await protocolClient.callTool({
+      name: "strata_trade",
+      arguments: { market: "SOL/USDC", side: "sell", amount: "0.1 SOL" },
+    });
+    assert.equal(preview.isError, undefined);
+    assert.match(JSON.stringify(preview.structuredContent), /trading_not_connected/);
+    assert.match(JSON.stringify(preview.structuredContent), /stratabook\.app\/agents/);
   } finally {
     await runtime.close();
   }
