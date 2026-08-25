@@ -3,6 +3,11 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.16
+
+- Consume the matching TypeScript SDK 0.2.16 packaging-parity release. MCP
+  tools and behavior are unchanged from 0.2.15.
+
 ## 0.2.15
 
 - Add explicit IntentBook prepare/submit tools in advanced mode and a one-call
