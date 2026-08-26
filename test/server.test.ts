@@ -855,7 +855,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
     mode: "create",
     expires_at_ms: null,
     permanent: true,
-    minimum_interval_seconds: 1,
+    minimum_interval_seconds: 0,
     maximum_tolerance_bps: 100,
     spending_limits: [
       {

@@ -3,6 +3,13 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.17
+
+- Consume the matching strategy-timed TypeScript SDK and allow an optional
+  zero cadence floor in advanced setup calls.
+- Keep the local pairing listener alive longer and close its helper tab after
+  credentials are saved, with a branded Strata return page as the fallback.
+
 ## 0.2.16
 
 - Consume the matching TypeScript SDK 0.2.16 packaging-parity release. MCP
