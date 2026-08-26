@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://stratabook.app">
-    <img src="https://raw.githubusercontent.com/alsk1992/strata-mcp/main/assets/readme-hero.svg" alt="Strata MCP — The deepest book in DeFi" width="100%" />
+    <img src="https://raw.githubusercontent.com/alsk1992/strata-mcp/main/assets/readme-hero.svg?v=20260826-2" alt="Strata MCP — The deepest book in DeFi" width="100%" />
   </a>
 </p>
 
