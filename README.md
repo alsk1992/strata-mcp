@@ -1,20 +1,46 @@
+<p align="center">
+  <a href="https://stratabook.app">
+    <img src="https://raw.githubusercontent.com/alsk1992/strata-mcp/main/assets/readme-hero.svg" alt="Strata MCP — The deepest book in DeFi" width="100%" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://stratabook.app">Trade</a> ·
+  <a href="https://stratabook.org/docs/agent-mcp">Docs</a> ·
+  <a href="https://www.npmjs.com/package/@stratabook/mcp">npm</a> ·
+  <a href="https://api.stratabook.app/mcp">Hosted MCP</a>
+</p>
+
 # Strata MCP
 
-Official MCP access to Strata and Sonar for every MCP-compatible client. It is
-not tied to Codex, Claude, Cursor, or any other host. The server delegates to
-`@stratabook/sdk` and follows Strata's live public policy.
+Give any MCP-compatible agent direct access to Strata markets and Sonar. It
+works across Claude Desktop, Cursor, Windsurf, Codex and any standards-based
+MCP host.
 
-The official hosted endpoint currently exposes market, exact-output, and
-asset-to-asset Sonar quotes, together with quote-bound execution tools.
-"Capability gated" simply means a tool disappears if Strata disables that
-operation live. It does **not** mean quotes need activation or user setup.
+Read-only access works immediately. No wallet, API key, session key, environment
+variable or settings screen is required to explore markets, books, prices,
+candles, trades, quotes and public maker data.
+
+| How you connect | Best for | What stays private |
+| --- | --- | --- |
+| Hosted: `https://api.stratabook.app/mcp` | Instant reads, Sonar quotes and externally signed prepare/submit flows | The shared server never receives a session secret |
+| Local: `npx -y @stratabook/mcp` | Reads now; optional one-call trading after `connect` | The session secret remains in a mode-0600 file on the user's machine |
+
+Intent, Strand and Current controls are live. A connected local MCP can execute
+session-backed trades, orders, TWAPs and Intent updates in one call. The hosted
+shared MCP exposes Intent prepare/submit instead because it deliberately never
+stores a user's session secret. Current tracks Strata's live mark automatically.
+
+Tool availability follows Strata's live safety policy. If an operation is
+paused, its tool disappears immediately; everyday reads and quotes require no
+activation.
 
 The default tool mode is deliberately compact. Agents call the requested tool
 directly instead of burning discovery calls before a quote. Use
 `--mode advanced` (or `STRATA_MCP_MODE=advanced`) only when an integration
 needs the explicit challenge / prepare / submit protocol tools.
 
-## Local stdio
+## Start locally
 
 Read-only use needs no wallet, key, autonomy setting, or environment variable:
 
@@ -167,8 +193,8 @@ original confirmed signature while the packet remains live.
 For maker funding, initialize the market Vault if needed, activate the Strand
 or Current, then deposit with `strata_vault_deposit`. The market keeps that
 available collateral while a control is live and returns it after the final
-control is disabled, exhausted, expired, or cancelled. Current follows Strata's
-live mark and needs no separate publisher transaction.
+control is disabled, exhausted, expired, or cancelled. Current tracks Strata's
+live mark automatically.
 
 The matching TypeScript package ships `strata-maker-conformance`. Its default
 `safe` mode exercises this hosted MCP's discovery, public maker reads, and
