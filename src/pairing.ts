@@ -11,7 +11,7 @@ import {
 
 const PUBLIC_KEY_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const SECRET_KEY_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{80,90}$/;
-const PAIRING_TIMEOUT_MS = 10 * 60_000;
+const PAIRING_TIMEOUT_MS = 30 * 60_000;
 
 export const DEFAULT_PAIRING_WEB_BASE = "https://stratabook.app";
 
@@ -34,6 +34,17 @@ export interface PairingOptions {
   readonly apiBase?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly nowMs?: () => number;
+}
+
+/** Local success page: close the helper tab when allowed, otherwise return to Strata. */
+export function pairingCompletionDocument(returnUrl: string): string {
+  const destination = JSON.stringify(returnUrl).replaceAll("<", "\\u003c");
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent connected · Strata</title><style>
+:root{color-scheme:dark}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#090b10;color:#f4f7fa;font:16px/1.5 system-ui,sans-serif}.card{max-width:34rem;margin:2rem;padding:2rem;border:1px solid #1b8596;border-radius:18px;background:linear-gradient(135deg,#0c171d,#100d1e)}h1{margin:.25rem 0 .5rem;font-size:1.7rem}p{margin:0;color:#aeb8c5}.mark{color:#34d6c4;font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:.75rem}
+</style></head><body><main class="card"><div class="mark">Strata</div><h1>Agent connected</h1><p>Your local credential is saved. You can close this tab.</p></main>
+<script>const destination=${destination};window.close();setTimeout(()=>location.replace(destination),700);</script></body></html>`;
 }
 
 function validPublicKey(value: unknown): value is string {
@@ -260,13 +271,17 @@ async function waitForPairingCallback(
     finished = true;
     try {
       await onComplete(ownerWallet);
-      response.writeHead(303, {
-        location: returnUrl,
+      const document = pairingCompletionDocument(returnUrl);
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "content-length": Buffer.byteLength(document),
         "cache-control": "no-store",
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+        "referrer-policy": "no-referrer",
         "x-content-type-options": "nosniff",
         "x-frame-options": "DENY",
       });
-      response.end();
+      response.end(document);
       settle(ownerWallet);
     } catch (error) {
       response.writeHead(500, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
@@ -293,7 +308,7 @@ async function waitForPairingCallback(
     if (finished) return;
     finished = true;
     server.close();
-    reject(new Error("Strata pairing timed out after 10 minutes"));
+    reject(new Error("Strata pairing timed out after 30 minutes"));
   }, PAIRING_TIMEOUT_MS);
   timeout.unref();
   completion.finally(() => clearTimeout(timeout)).catch(() => undefined);

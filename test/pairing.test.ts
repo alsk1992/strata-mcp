@@ -6,11 +6,20 @@ import test from "node:test";
 import { generateSessionKeypair } from "@stratabook/sdk";
 import {
   loadTradingEnvironment,
+  pairingCompletionDocument,
   pairingPageUrl,
   readTradingConnection,
   tradingCredentialsPath,
   writeTradingConnection,
 } from "../src/pairing.js";
+
+test("the local pairing completion closes its helper tab with a safe fallback", () => {
+  const document = pairingCompletionDocument("https://stratabook.app/agents?paired=connected");
+  assert.match(document, /Agent connected/);
+  assert.match(document, /window\.close\(\)/);
+  assert.match(document, /location\.replace\(destination\)/);
+  assert.match(document, /https:\/\/stratabook\.app\/agents\?paired=connected/);
+});
 
 test("replacement URLs bind the old public key and its owner without exposing a secret", () => {
   const url = new URL(pairingPageUrl(
