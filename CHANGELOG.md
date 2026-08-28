@@ -3,6 +3,22 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.18
+
+- Hot-reload locally paired session credentials inside a running MCP process;
+  `connect`, session replacement, and disconnect no longer require a client
+  restart.
+- Expose `strata_order_execute` in simple mode with human limit-order intent:
+  market label, side, percentage of available balance, and signed mark offset.
+  Strata resolves exact asset atoms, decimals, mark and tick alignment.
+- Keep authenticated order channels warm for durable dead-man heartbeats. A
+  placement whose guard cannot be proven is cancelled fail-closed.
+- Expand `strata_autonomy` into a public-key-only runtime handshake covering
+  package version, mode, credential source, loaded/file/on-chain session
+  consistency, execution readiness, expiry, and clock skew.
+- Preserve exact `retry_after_ms` values instead of retrying every transient
+  read after a fixed 150ms.
+
 ## 0.2.17
 
 - Consume the matching strategy-timed TypeScript SDK and allow an optional

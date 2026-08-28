@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -109,12 +109,21 @@ export async function writeTradingConnection(
   path = tradingCredentialsPath(),
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, `${JSON.stringify(connection, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  // `mode` is honored on creation. chmod also tightens a pre-existing file.
-  if (process.platform !== "win32") await chmod(path, 0o600);
+  const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    await writeFile(temporary, `${JSON.stringify(connection, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    // `mode` is honored on creation. chmod also protects unusual umasks.
+    if (process.platform !== "win32") await chmod(temporary, 0o600);
+    // Same-directory rename means the live MCP sees either the old complete
+    // credential or the new complete credential, never a partially written file.
+    await rename(temporary, path);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function removeTradingConnection(
@@ -388,7 +397,7 @@ export async function runLocalPairing(options: PairingOptions): Promise<void> {
   const ownerWallet = await callback.completion;
   process.stdout.write(
     options.action === "connect"
-      ? `✓ Trading connected for ${ownerWallet}. Credentials saved privately at ${path}.\nRestart or refresh your MCP client.\n`
+      ? `✓ Trading connected for ${ownerWallet}. Credentials saved privately at ${path}.\nThis MCP release and newer pick it up automatically; restart only older clients.\n`
       : `✓ Session revoked for ${ownerWallet}. Local trading credentials removed.\n`,
   );
 }

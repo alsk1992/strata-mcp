@@ -28,6 +28,7 @@ import type {
   PlatformOrderStatusResponse,
   PlatformOrderSubmitInput,
   PlatformOrderSubmitResponse,
+  PlatformOrderCommandConnection,
   PlatformActionGraphResponse,
   PlatformDiscoveryResponse,
   PlatformCandlesResponse,
@@ -96,7 +97,7 @@ import {
   STRATA_PLATFORM_GRAPH_URI,
 } from "../src/server.js";
 import { SERVER_VERSION } from "../src/version.js";
-import { DailyUsdBudget } from "../src/autonomy.js";
+import { DailyUsdBudget, type SessionAutonomy } from "../src/autonomy.js";
 
 const require = createRequire(import.meta.url);
 const packageMetadata = require("../../package.json") as { version: string };
@@ -1313,12 +1314,14 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_candles",
         "strata_capabilities",
         "strata_exact_output_quote",
+        "strata_execute_quote",
         "strata_execution_challenge",
         "strata_execution_prepare",
         "strata_execution_status",
         "strata_execution_submit",
         "strata_market_making_current_prepare",
         "strata_market_making_current_submit",
+        "strata_market_making_intent_execute",
         "strata_market_making_intent_prepare",
         "strata_market_making_intent_submit",
         "strata_market_making_prepare",
@@ -1330,6 +1333,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_markets",
         "strata_marks",
         "strata_order_challenge",
+        "strata_order_execute",
         "strata_order_prepare",
         "strata_order_status",
         "strata_order_submit",
@@ -1347,6 +1351,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_trades",
         "strata_twap_cancel",
         "strata_twap_challenge",
+        "strata_twap_execute",
         "strata_twap_prepare",
         "strata_twap_submit",
         "strata_twaps",
@@ -2097,12 +2102,14 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_bugs",
         "strata_candles",
         "strata_capabilities",
+        "strata_execute_quote",
         "strata_execution_challenge",
         "strata_execution_prepare",
         "strata_execution_status",
         "strata_execution_submit",
         "strata_market_making_current_prepare",
         "strata_market_making_current_submit",
+        "strata_market_making_intent_execute",
         "strata_market_making_intent_prepare",
         "strata_market_making_intent_submit",
         "strata_market_making_prepare",
@@ -2114,6 +2121,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_markets",
         "strata_marks",
         "strata_order_challenge",
+        "strata_order_execute",
         "strata_order_prepare",
         "strata_order_status",
         "strata_order_submit",
@@ -2129,6 +2137,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_trades",
         "strata_twap_cancel",
         "strata_twap_challenge",
+        "strata_twap_execute",
         "strata_twap_prepare",
         "strata_twap_submit",
         "strata_twaps",
@@ -2258,6 +2267,192 @@ test("session autonomy adds one-shot execute tools and a read-only slider", asyn
   }
 });
 
+test("simple limit-order intent hot-loads a session and keeps a guarded order channel warm", async () => {
+  const marketId = `market_${"2".repeat(32)}`;
+  const ownerWallet = "Ownr1111111111111111111111111111111111111111";
+  const signer = {
+    publicKey: "Sess1111111111111111111111111111111111111111",
+    signMessage: async () => new Uint8Array(),
+    signTransaction: async () => "",
+  };
+  let liveAutonomy: SessionAutonomy | null = null;
+  let placed: Record<string, unknown> | undefined;
+  let armedTimeout: number | undefined;
+  let armShouldFail = false;
+  let portfolioReads = 0;
+  const executedActions: string[] = [];
+  let channelClosed = false;
+  const connection = {
+    ready: Promise.resolve(),
+    execute: async (input: { operation: Record<string, unknown> }) => {
+      executedActions.push(String(input.operation.action));
+      if (input.operation.action === "place") placed = input.operation;
+      return {
+        schema_version: 2,
+        contract_version: "2.0",
+        order_control_id: `or_${"3".repeat(32)}`,
+        market_id: marketId,
+        action: input.operation.action,
+        order_ids: [`order_${"4".repeat(32)}`],
+        signature: "5".repeat(64),
+        status: "submitted",
+      };
+    },
+    status: async () => ({
+      schema_version: 2,
+      contract_version: "2.0",
+      order_control_id: `or_${"3".repeat(32)}`,
+      market_id: marketId,
+      action: "place",
+      order_ids: [`order_${"4".repeat(32)}`],
+      signature: "5".repeat(64),
+      status: "submitted",
+      failure_code: null,
+      updated_at_ms: 1_786_550_400_100,
+    }),
+    armDeadMan: async ({ timeoutMs }: { timeoutMs: number }) => {
+      if (armShouldFail) throw new Error("guard unavailable");
+      armedTimeout = timeoutMs;
+      return {
+        status: "armed",
+        timeout_ms: timeoutMs,
+        heartbeat_deadline_ms: 1_786_550_410_000,
+        order_control_id: `or_${"6".repeat(32)}`,
+        idempotency_key: `guard-or_${"3".repeat(32)}`,
+        signed_transaction_expires_at_ms: 1_786_550_500_000,
+        signature: null,
+        failure_code: null,
+      };
+    },
+    close: () => { channelClosed = true; },
+  } as unknown as PlatformOrderCommandConnection;
+  const fakeClient = {
+    capabilities: async () => autonomyCatalog(),
+    markets: async () => ({ schema_version: 1, contract_version: CONTRACT_VERSION, markets: [] }),
+  } as unknown as StrataClient;
+  const fakePlatformClient = {
+    discovery: { read: async () => platformCatalog() },
+    markets: {
+      resolve: async () => ({
+        market_id: marketId,
+        label: "SOL/USDC",
+        base_asset_id: `asset_${"a".repeat(32)}`,
+        quote_asset_id: `asset_${"b".repeat(32)}`,
+        status: "active",
+        available_actions: ["place_order"],
+      }),
+      list: async () => ({ markets: [], page: { next_cursor: null, has_more: false } }),
+    },
+    assets: {
+      list: async () => ({
+        assets: [
+          { asset_id: `asset_${"a".repeat(32)}`, symbol: "SOL", name: "Solana", decimals: 9, network: "solana" },
+          { asset_id: `asset_${"b".repeat(32)}`, symbol: "USDC", name: "USD Coin", decimals: 6, network: "solana" },
+        ],
+      }),
+    },
+    marketData: {
+      mark: async () => ({
+        server_time_ms: 1_786_550_400_000,
+        price_atoms_per_base_unit: "150000000",
+        quote_decimals: 6,
+        stale: false,
+      }),
+    },
+    books: {
+      status: async () => ({ tick_size_atoms: "10000", minimum_order_size_atoms: "1" }),
+      fees: async () => ({ passive_maker_fee_bps: 0 }),
+    },
+    account: {
+      portfolio: async () => {
+        portfolioReads += 1;
+        return {
+          observed_slot: "300000000",
+          observed_at_ms: 1_786_550_400_000,
+          unavailable_market_ids: [],
+          balances: [{
+            asset_id: `asset_${"a".repeat(32)}`,
+            available_atoms: "2000000000",
+            locked_atoms: "0",
+            total_atoms: "2000000000",
+            value_usd_micros: "300000000",
+          }],
+          open_orders: portfolioReads > 1 ? [{
+            order_id: `order_${"4".repeat(32)}`,
+            market_id: marketId,
+            side: "sell",
+            order_type: "post_only",
+            state: "open",
+            limit_price_atoms: "154500000",
+            original_size_atoms: "200000000",
+            remaining_size_atoms: "200000000",
+          }] : [],
+        };
+      },
+    },
+    orders: { connect: async () => connection },
+  } as unknown as StrataPlatformClient;
+  const runtime = await createStrataMcpServer({
+    client: fakeClient,
+    platformClient: fakePlatformClient,
+    sessionAutonomyProvider: async () => liveAutonomy,
+  });
+  const protocolClient = new Client({ name: "friendly-order-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await runtime.server.connect(serverTransport);
+    await protocolClient.connect(clientTransport);
+    assert.ok((await protocolClient.listTools()).tools.some((tool) => tool.name === "strata_order_execute"));
+    const before = await protocolClient.callTool({ name: "strata_autonomy", arguments: {} });
+    assert.equal((before.structuredContent as Record<string, unknown>).session_configured, false);
+
+    liveAutonomy = {
+      signer,
+      ownerWallet,
+      config: { level: "instant" },
+      dailyBudget: new DailyUsdBudget(),
+    };
+    const result = await protocolClient.callTool({
+      name: "strata_order_execute",
+      arguments: {
+        action: "place",
+        market: "SOL/USDC",
+        side: "sell",
+        availablePercent: 10,
+        markOffsetBps: 300,
+      },
+    });
+    assert.equal(result.isError, undefined);
+    assert.equal(placed?.action, "place");
+    assert.equal(placed?.sizeAtoms, "200000000");
+    assert.equal(placed?.limitPriceAtoms, "154500000");
+    assert.equal(placed?.orderType, "post_only");
+    assert.equal(armedTimeout, 10_000);
+    assert.match(JSON.stringify(result.structuredContent), /confirmed_open/);
+
+    armShouldFail = true;
+    const failClosed = await protocolClient.callTool({
+      name: "strata_order_execute",
+      arguments: {
+        action: "place",
+        market: "SOL/USDC",
+        side: "sell",
+        availablePercent: 10,
+        markOffsetBps: 300,
+        clientOrderId: "guard-failure-case",
+      },
+    });
+    assert.equal(failClosed.isError, true);
+    assert.match(JSON.stringify(failClosed.structuredContent), /dead_man_setup_failed/);
+    assert.deepEqual(executedActions.slice(-2), ["place", "cancel"]);
+  } finally {
+    await protocolClient.close();
+    await runtime.close();
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(channelClosed, true);
+});
+
 test("the default surface stays compact and reports trading as optional", async () => {
   const defaultMarkets: MarketsResponse = {
     schema_version: 1,
@@ -2311,8 +2506,6 @@ test("the default surface stays compact and reports trading as optional", async 
     assert.ok(names.includes("strata_trade"));
     assert.ok(!names.includes("strata_capabilities"));
     assert.ok(!names.includes("strata_exact_output_quote"));
-    assert.ok(!names.includes("strata_order_execute"));
-    assert.ok(!names.includes("strata_order_execute"));
     const read = await protocolClient.callTool({ name: "strata_autonomy", arguments: {} });
     const state = read.structuredContent as Record<string, unknown>;
     assert.equal(state.session_configured, false);
