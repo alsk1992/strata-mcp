@@ -21,6 +21,7 @@ export const SIMPLE_TOOL_NAMES = new Set([
   "strata_market_making_intent_execute",
   "strata_autonomy",
   "strata_trade",
+  "strata_order_execute",
 ]);
 
 export function parseToolMode(raw: string | undefined): StrataMcpToolMode {

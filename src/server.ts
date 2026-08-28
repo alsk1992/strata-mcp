@@ -29,6 +29,7 @@ import {
   type PlatformReferralClaimResponse,
   type PlatformReferralLinkResponse,
   type PlatformOrderExecuteOperation,
+  type PlatformOrderCommandConnection,
   type PlatformTwapExecuteOperation,
 } from "@stratabook/sdk";
 import {
@@ -37,6 +38,7 @@ import {
   quoteNotionalUsd,
   MarketMetaResolver,
   type SessionAutonomy,
+  type SessionAutonomyProvider,
 } from "./autonomy.js";
 import * as z from "zod/v4";
 import {
@@ -67,6 +69,22 @@ export interface StrataMcpOptions {
    * every trade is prepared for a human to sign. Built from env in the CLI.
    */
   sessionAutonomy?: SessionAutonomy;
+  /**
+   * Live source used by long-running hosts. When present it is consulted for
+   * every trading call, allowing `strata-mcp connect` to rotate the private
+   * credential file without restarting the MCP process.
+   */
+  sessionAutonomyProvider?: SessionAutonomyProvider;
+  /** Public-only credential metadata for the runtime health handshake. */
+  sessionCredentialDiagnostics?: () => Promise<SessionCredentialDiagnostics>;
+  /** False for stateless HTTP runtimes that cannot heartbeat a durable guard. */
+  persistentOrderGuards?: boolean;
+}
+
+export interface SessionCredentialDiagnostics {
+  readonly source: "environment" | "file" | "none";
+  readonly credentials_file: string | null;
+  readonly credential_file_session_public_key: string | null;
 }
 
 export interface StrataMcpRuntime {
@@ -524,6 +542,384 @@ const PLATFORM_MARKET_PAGE_LIMIT = 100;
 const PLATFORM_MARKET_MAX_PAGES = 20;
 
 /**
+ * Keeps authenticated order channels warm so a durable dead-man ticket can be
+ * heartbeated after the one MCP call returns. A session rotation closes every
+ * old channel; its already-armed ticket then fails closed instead of leaving
+ * orders unmanaged.
+ */
+class WarmOrderConnectionPool {
+  private readonly connections = new Map<string, Promise<PlatformOrderCommandConnection>>();
+  private sessionBinding: string | null = null;
+
+  constructor(private readonly platformClient: StrataPlatformClient) {}
+
+  reconcile(autonomy: SessionAutonomy | null): void {
+    const binding = autonomy === null
+      ? null
+      : `${autonomy.ownerWallet}:${autonomy.signer.publicKey}`;
+    if (binding === this.sessionBinding) return;
+    this.close();
+    this.sessionBinding = binding;
+  }
+
+  async get(marketId: string, autonomy: SessionAutonomy): Promise<PlatformOrderCommandConnection> {
+    this.reconcile(autonomy);
+    let pending = this.connections.get(marketId);
+    if (!pending) {
+      pending = this.platformClient.orders.connect(
+        marketId,
+        autonomy.ownerWallet,
+        autonomy.signer,
+        {
+          onError: (error) => {
+            process.stderr.write(
+              `[strata-mcp] guarded order channel failed for ${marketId}: ${safeMessage(error)}\n`,
+            );
+          },
+        },
+      ).then(async (connection) => {
+        await connection.ready;
+        return connection;
+      });
+      this.connections.set(marketId, pending);
+      pending.catch(() => {
+        if (this.connections.get(marketId) === pending) this.connections.delete(marketId);
+      });
+    }
+    return pending;
+  }
+
+  close(): void {
+    for (const pending of this.connections.values()) {
+      pending.then((connection) => connection.close()).catch(() => undefined);
+    }
+    this.connections.clear();
+    this.sessionBinding = null;
+  }
+}
+
+interface FriendlyOrderIntentArgs {
+  readonly market: string;
+  readonly side: "buy" | "sell";
+  readonly availablePercent: number;
+  readonly markOffsetBps: number;
+  readonly clientOrderId?: string;
+  readonly orderType?: "good_until_cancelled" | "post_only";
+}
+
+interface ResolvedFriendlyOrder {
+  readonly marketId: string;
+  readonly clientOrderId: string;
+  readonly side: "buy" | "sell";
+  readonly orderType: "good_until_cancelled" | "post_only";
+  readonly limitPriceAtoms: string;
+  readonly sizeAtoms: string;
+  readonly notionalUsd: number;
+  readonly resolution: Record<string, unknown>;
+}
+
+/** Resolve a human limit-order instruction from one coherent public snapshot. */
+async function resolveFriendlyOrderIntent(
+  platformClient: StrataPlatformClient,
+  autonomy: SessionAutonomy,
+  args: FriendlyOrderIntentArgs,
+  nowMs: () => number,
+): Promise<ResolvedFriendlyOrder> {
+  const percentageHundredths = Math.round(args.availablePercent * 100);
+  if (
+    !Number.isFinite(args.availablePercent)
+    || args.availablePercent <= 0
+    || args.availablePercent > 100
+    || Math.abs(args.availablePercent * 100 - percentageHundredths) > 1e-8
+  ) {
+    throw new TypeError("availablePercent must be greater than 0 and at most 100, with at most two decimals");
+  }
+  if (!Number.isSafeInteger(args.markOffsetBps) || args.markOffsetBps <= -10_000) {
+    throw new TypeError("markOffsetBps must be an integer greater than -10000");
+  }
+
+  const market = await platformClient.markets.resolve(args.market);
+  if (market.status !== "active" || !market.available_actions.includes("place_order")) {
+    throw new Error(`${market.label} is not currently accepting resting orders`);
+  }
+  const [mark, status, fees, portfolio, assetsPage] = await Promise.all([
+    platformClient.marketData.mark(market.market_id),
+    platformClient.books.status(market.market_id),
+    platformClient.books.fees(market.market_id),
+    platformClient.account.portfolio(autonomy.ownerWallet),
+    platformClient.assets.list({ limit: 200 }),
+  ]);
+  if (mark.stale || mark.price_atoms_per_base_unit === null) {
+    throw new Error(`${market.label} does not have a fresh mark`);
+  }
+  const baseAsset = assetsPage.assets.find((asset) => asset.asset_id === market.base_asset_id)
+    ?? await platformClient.assets.resolve(market.base_asset_id);
+  const quoteAsset = assetsPage.assets.find((asset) => asset.asset_id === market.quote_asset_id)
+    ?? await platformClient.assets.resolve(market.quote_asset_id);
+  if (mark.quote_decimals !== quoteAsset.decimals) {
+    throw new Error(`${market.label} mark decimals do not match its quote asset`);
+  }
+
+  const tick = BigInt(status.tick_size_atoms);
+  const markAtoms = BigInt(mark.price_atoms_per_base_unit);
+  if (tick <= 0n || markAtoms <= 0n) throw new Error(`${market.label} returned invalid price metadata`);
+  const factor = BigInt(10_000 + args.markOffsetBps);
+  const priceDenominator = 10_000n * tick;
+  const priceNumerator = markAtoms * factor;
+  const priceTicks = args.side === "sell"
+    ? (priceNumerator + priceDenominator - 1n) / priceDenominator
+    : priceNumerator / priceDenominator;
+  const limitPriceAtoms = priceTicks * tick;
+  if (limitPriceAtoms <= 0n) throw new Error("the resolved limit price is below one tick");
+
+  const inputAssetId = args.side === "sell" ? market.base_asset_id : market.quote_asset_id;
+  const inputBalance = portfolio.balances.find((balance) => balance.asset_id === inputAssetId);
+  if (!inputBalance) throw new Error(`no ${args.side === "sell" ? baseAsset.symbol : quoteAsset.symbol} balance is available`);
+  const availableAtoms = BigInt(inputBalance.available_atoms);
+  const budgetAtoms = availableAtoms * BigInt(percentageHundredths) / 10_000n;
+  const baseUnit = 10n ** BigInt(baseAsset.decimals);
+  const positiveMakerFeeBps = BigInt(Math.max(0, fees.passive_maker_fee_bps));
+  const sizeAtoms = args.side === "sell"
+    ? budgetAtoms
+    : budgetAtoms * baseUnit * 10_000n
+      / (limitPriceAtoms * (10_000n + positiveMakerFeeBps));
+  if (sizeAtoms <= 0n) throw new Error("the requested percentage resolves below the minimum order size");
+  if (sizeAtoms < BigInt(status.minimum_order_size_atoms)) {
+    throw new Error(`the resolved size is below ${status.minimum_order_size_atoms} base atoms`);
+  }
+
+  // Autonomy ceilings are risk limits, so value the order at the less
+  // favourable of its live mark and limit instead of allowing an aggressive
+  // offset to understate the amount the session may spend.
+  const riskPriceAtoms = markAtoms > limitPriceAtoms ? markAtoms : limitPriceAtoms;
+  const notionalQuoteAtoms = sizeAtoms * riskPriceAtoms / baseUnit;
+  const notionalUsd = Number(notionalQuoteAtoms) / 10 ** quoteAsset.decimals;
+  if (!Number.isFinite(notionalUsd) || notionalUsd <= 0) {
+    throw new Error("the resolved order notional is invalid");
+  }
+  const clientOrderId = args.clientOrderId
+    ?? `mcp-${nowMs().toString(36)}-${autonomy.signer.publicKey.slice(0, 8)}`;
+  return {
+    marketId: market.market_id,
+    clientOrderId,
+    side: args.side,
+    orderType: args.orderType ?? "post_only",
+    limitPriceAtoms: limitPriceAtoms.toString(),
+    sizeAtoms: sizeAtoms.toString(),
+    notionalUsd,
+    resolution: {
+      market: market.label,
+      market_id: market.market_id,
+      client_order_id: clientOrderId,
+      side: args.side,
+      available_percent: args.availablePercent,
+      input_asset: args.side === "sell" ? baseAsset.symbol : quoteAsset.symbol,
+      input_available_atoms: availableAtoms.toString(),
+      input_budget_atoms: budgetAtoms.toString(),
+      size_atoms: sizeAtoms.toString(),
+      size_display: `${formatAtoms(sizeAtoms.toString(), baseAsset.decimals)} ${baseAsset.symbol}`,
+      mark_price_atoms: markAtoms.toString(),
+      mark_offset_bps: args.markOffsetBps,
+      limit_price_atoms: limitPriceAtoms.toString(),
+      risk_price_atoms: riskPriceAtoms.toString(),
+      risk_notional_usd: notionalUsd,
+      tick_size_atoms: tick.toString(),
+      portfolio_observed_slot: portfolio.observed_slot,
+      portfolio_observed_at_ms: portfolio.observed_at_ms,
+      mark_server_time_ms: mark.server_time_ms,
+    },
+  };
+}
+
+async function waitForOrderSubmission(
+  connection: PlatformOrderCommandConnection,
+  orderControlId: string,
+  idempotencyKey: string,
+): Promise<PlatformOrderStatusResponse> {
+  let status = await connection.status(orderControlId, idempotencyKey);
+  for (let attempt = 0; status.status === "submitting" && attempt < 12; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    status = await connection.status(orderControlId, idempotencyKey);
+  }
+  return status;
+}
+
+type GuardedOrderOutcome =
+  | {
+      readonly ok: true;
+      readonly receipt: Awaited<ReturnType<PlatformOrderCommandConnection["execute"]>>;
+      readonly status: PlatformOrderStatusResponse | null;
+      readonly statusError: string | null;
+      readonly deadMan: Awaited<ReturnType<PlatformOrderCommandConnection["armDeadMan"]>>;
+    }
+  | {
+      readonly ok: false;
+      readonly code: "order_submission_failed" | "dead_man_setup_failed" | "dead_man_setup_ambiguous";
+      readonly message: string;
+      readonly details: Record<string, unknown>;
+    };
+
+/**
+ * Existing protocol cannot pre-sign a cancel for an order that does not exist
+ * yet. Close that gap operationally: confirm the placement, arm immediately on
+ * the same warm socket, and cancel the new order if arming cannot be proven.
+ */
+async function executeGuardedOrder(
+  connection: PlatformOrderCommandConnection,
+  autonomy: SessionAutonomy,
+  operation: Extract<PlatformOrderExecuteOperation, { action: "place" }>,
+  idempotencyKey: string,
+  deadManTimeoutMs: number,
+): Promise<GuardedOrderOutcome> {
+  const receipt = await connection.execute({ operation, idempotencyKey });
+  let status: PlatformOrderStatusResponse | null = null;
+  let statusError: string | null = null;
+  try {
+    status = await waitForOrderSubmission(connection, receipt.order_control_id, idempotencyKey);
+  } catch (error) {
+    // The order may already be live. Continue to the guard instead of leaving
+    // it unmanaged merely because the confirmation read was throttled.
+    statusError = safeMessage(error);
+  }
+  if (status?.status === "failed") {
+    return {
+      ok: false,
+      code: "order_submission_failed",
+      message: `Order submission failed: ${status.failure_code ?? "unknown"}.`,
+      details: { receipt, status },
+    };
+  }
+
+  let guardError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const deadMan = await connection.armDeadMan({
+        timeoutMs: deadManTimeoutMs,
+        idempotencyKey: `guard-${receipt.order_control_id}`,
+      });
+      return { ok: true, receipt, status, statusError, deadMan };
+    } catch (error) {
+      guardError = error;
+      if (attempt === 0) {
+        const delay = error instanceof StrataApiError ? error.retryAfterMs ?? 100 : 100;
+        // No guard exists yet. A long provider retry window must not leave the
+        // freshly placed order exposed while we wait; cancel it immediately.
+        if (delay > 250) break;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  const orderId = receipt.order_ids[0];
+  if (orderId) {
+    try {
+      const cancellation = await connection.execute({
+        operation: { action: "cancel", ownerWallet: autonomy.ownerWallet, orderId },
+        idempotencyKey: `guard-failed-cancel-${receipt.order_control_id}`,
+      });
+      let cancellationStatus: PlatformOrderStatusResponse;
+      try {
+        cancellationStatus = await waitForOrderSubmission(
+          connection,
+          cancellation.order_control_id,
+          `guard-failed-cancel-${receipt.order_control_id}`,
+        );
+      } catch (cancelStatusError) {
+        return {
+          ok: false,
+          code: "dead_man_setup_ambiguous",
+          message: "The order guard failed and Strata submitted a cancellation, but could not prove that cancellation completed.",
+          details: {
+            receipt,
+            status,
+            status_error: statusError,
+            cancellation,
+            guard_error: safeMessage(guardError),
+            cancellation_status_error: safeMessage(cancelStatusError),
+          },
+        };
+      }
+      if (cancellationStatus.status !== "submitted") {
+        return {
+          ok: false,
+          code: "dead_man_setup_ambiguous",
+          message: "The order guard failed and its fail-closed cancellation was not confirmed.",
+          details: { receipt, status, status_error: statusError, cancellation, cancellationStatus },
+        };
+      }
+      return {
+        ok: false,
+        code: "dead_man_setup_failed",
+        message: "The order was submitted but its dead-man guard could not be proven, so Strata cancelled it fail-closed.",
+        details: {
+          receipt,
+          status,
+          status_error: statusError,
+          cancellation,
+          cancellation_status: cancellationStatus,
+          guard_error: safeMessage(guardError),
+        },
+      };
+    } catch (cancelError) {
+      return {
+        ok: false,
+        code: "dead_man_setup_ambiguous",
+        message: "The order was submitted, but neither its dead-man guard nor fail-closed cancellation could be proven.",
+        details: {
+          receipt,
+          status,
+          status_error: statusError,
+          guard_error: safeMessage(guardError),
+          cancellation_error: safeMessage(cancelError),
+        },
+      };
+    }
+  }
+  return {
+    ok: false,
+    code: "dead_man_setup_ambiguous",
+    message: "The order was submitted without a returned order ID, so its guard could not be proven.",
+    details: { receipt, status, status_error: statusError, guard_error: safeMessage(guardError) },
+  };
+}
+
+async function observePlacedOrderLifecycle(
+  platformClient: StrataPlatformClient,
+  ownerWallet: string,
+  orderIds: readonly string[],
+): Promise<Record<string, unknown>> {
+  try {
+    const portfolio = await platformClient.account.portfolio(ownerWallet);
+    const orders = orderIds.map((orderId) => {
+      const visible = portfolio.open_orders.find((order) => order.order_id === orderId);
+      return { order_id: orderId, state: visible?.state ?? "pending_visibility" };
+    });
+    const state = orders.length > 0 && orders.every((order) =>
+      order.state === "open" || order.state === "partially_filled"
+    )
+      ? orders.every((order) => order.state === "open") ? "confirmed_open" : "partially_filled"
+      : "confirmed_pending_visibility";
+    return {
+      state,
+      orders,
+      observed_at_ms: portfolio.observed_at_ms,
+      observed_slot: portfolio.observed_slot,
+      unavailable_market_ids: portfolio.unavailable_market_ids,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      state: "confirmed_pending_visibility",
+      orders: orderIds.map((orderId) => ({ order_id: orderId, state: "pending_visibility" })),
+      observed_at_ms: null,
+      observed_slot: null,
+      unavailable_market_ids: [],
+      error: safeMessage(error),
+    };
+  }
+}
+
+/**
  * Every live platform market keyed by label, so the tool can hand agents the
  * opaque `market_id` (and asset ids) that every by-market tool takes. A
  * platform read failure leaves the list unidentified rather than failing it.
@@ -563,6 +959,8 @@ export async function createStrataMcpServer(
 ): Promise<StrataMcpRuntime> {
   const client = strataClient(options);
   const toolMode = options.toolMode ?? "simple";
+  const autonomyForCall: SessionAutonomyProvider = options.sessionAutonomyProvider
+    ?? (async () => options.sessionAutonomy ?? null);
   const platformClient = options.platformClient ?? new StrataPlatformClient({
     apiBase: options.apiBase,
     timeoutMs: options.timeoutMs,
@@ -1933,7 +2331,8 @@ export async function createStrataMcpServer(
           amountInAtoms: resolvedAtoms!,
           maximumToleranceBps,
         }));
-        if (!options.sessionAutonomy) {
+        const autonomy = await autonomyForCall();
+        if (!autonomy) {
           return toolResult(
             {
               executed: false,
@@ -1965,7 +2364,7 @@ export async function createStrataMcpServer(
           : null;
         const resolver = new MarketMetaResolver(platformClient, async () => sonarMarkets, () => Date.now());
         const marketId = sonar ? await resolver.idForLabel(sonar.label) : null;
-        const decision = decideAutonomy(options.sessionAutonomy, marketId ?? "", notional, Date.now());
+        const decision = decideAutonomy(autonomy, marketId ?? "", notional, Date.now());
         if (!decision.allow) {
           return toolResult(
             { executed: false, reason: decision.reason, quote: freshQuote },
@@ -1974,11 +2373,11 @@ export async function createStrataMcpServer(
         }
         const receipt = await client.executeQuote({
           quote: freshQuote,
-          ownerWallet: options.sessionAutonomy.ownerWallet,
-          signer: options.sessionAutonomy.signer,
+          ownerWallet: autonomy.ownerWallet,
+          signer: autonomy.signer,
           ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         });
-        if (notional !== null) options.sessionAutonomy.dailyBudget.record(notional, Date.now());
+        if (notional !== null) autonomy.dailyBudget.record(notional, Date.now());
         return toolResult(
           { executed: true, receipt, notional_usd: notional },
           `Executed ${side} ${inputDisplay} as ${receipt.signature}.`,
@@ -2803,8 +3202,17 @@ export async function createStrataMcpServer(
       }),
   );
 
-  registerAutonomyTools(registerTool, client, platformClient, options.sessionAutonomy, () =>
-    typeof Date !== "undefined" ? Date.now() : 0,
+  const orderConnections = new WarmOrderConnectionPool(platformClient);
+  registerAutonomyTools(
+    registerTool,
+    client,
+    platformClient,
+    autonomyForCall,
+    orderConnections,
+    toolMode,
+    options.persistentOrderGuards ?? true,
+    options.sessionCredentialDiagnostics,
+    () => typeof Date !== "undefined" ? Date.now() : 0,
   );
 
   void [
@@ -2831,10 +3239,12 @@ export async function createStrataMcpServer(
   let closed = false;
   const refresh = async () => {
     if (closed) return;
-    const [catalog, platformCatalog] = await Promise.all([
+    const [catalog, platformCatalog, autonomy] = await Promise.all([
       client.capabilities(),
       platformClient.discovery.read(),
+      autonomyForCall(),
     ]);
+    orderConnections.reconcile(autonomy);
     applyToolAvailability(registeredTools, catalog, platformCatalog, toolMode);
   };
   const timer = setInterval(() => {
@@ -2850,6 +3260,7 @@ export async function createStrataMcpServer(
     close: async () => {
       closed = true;
       clearInterval(timer);
+      orderConnections.close();
       await server.close();
     },
   };
@@ -2859,7 +3270,11 @@ function registerAutonomyTools(
   registerTool: McpServer["registerTool"],
   client: StrataClient,
   platformClient: StrataPlatformClient,
-  autonomy: SessionAutonomy | undefined,
+  autonomyProvider: SessionAutonomyProvider,
+  orderConnections: WarmOrderConnectionPool,
+  toolMode: StrataMcpToolMode,
+  persistentOrderGuards: boolean,
+  credentialDiagnostics: StrataMcpOptions["sessionCredentialDiagnostics"],
   nowMs: () => number,
 ): void {
   // Always present, always read-only: the agent may show the slider and offer
@@ -2881,8 +3296,15 @@ function registerAutonomyTools(
       },
     },
     async () => {
+      let autonomy: SessionAutonomy | null = null;
+      let runtimeError: string | null = null;
+      try {
+        autonomy = await autonomyProvider();
+      } catch (error) {
+        runtimeError = safeMessage(error);
+      }
       const howToChange = {
-        setup: "Open the Agents page, connect the owner wallet, register once, then copy the MCP trading config into your client's local settings.",
+        setup: "Run `npx -y @stratabook/mcp connect`; it opens the Agents page, registers the locally generated public key, and the running MCP hot-loads the private credential.",
         agents_page: "https://stratabook.app/agents",
         generic_clients: "Claude Desktop, Cursor, Windsurf, Codex, or any local stdio MCP host",
         note: "Read-only tools need none of this. Only the user changes trading authority; an agent can never raise its own level.",
@@ -2894,15 +3316,62 @@ function registerAutonomyTools(
           session_env: "STRATA_SESSION_SECRET_KEY + STRATA_OWNER_WALLET (register the key on the Agents page)",
         },
       };
+      let credential: SessionCredentialDiagnostics = {
+        source: "none" as const,
+        credentials_file: null,
+        credential_file_session_public_key: null,
+      };
+      try {
+        credential = await credentialDiagnostics?.() ?? credential;
+      } catch (error) {
+        runtimeError ??= safeMessage(error);
+      }
       if (!autonomy) {
         return toolResult(
-          { session_configured: false, level: "ask", how_to_change: howToChange },
+          {
+            session_configured: false,
+            level: "ask",
+            runtime: {
+              mcp_version: SERVER_VERSION,
+              tool_mode: toolMode,
+              credential_source: credential.source,
+              credentials_file: credential.credentials_file,
+              loaded_session_public_key: null,
+              credential_file_session_public_key: credential.credential_file_session_public_key,
+              session_key_consistent: null,
+              on_chain: null,
+              trading_tools_usable: false,
+              diagnostic_error: runtimeError,
+              credential_reload_supported: true,
+              credential_restart_required: false,
+              package_upgrade_requires_process_restart: true,
+            },
+            how_to_change: howToChange,
+          },
           "Read-only is ready. Trading is not connected, so I cannot send transactions. "
-            + "If you want trading, open https://stratabook.app/agents and copy its MCP trading config "
-            + "into your client; never paste the session secret into chat.",
+            + "If you want trading, run `npx -y @stratabook/mcp connect`; never paste the session secret into chat.",
         );
       }
       const { config } = autonomy;
+      let onChain: Record<string, unknown> | null = null;
+      if (platformClient.vault?.status) {
+        try {
+          const status = await platformClient.vault.status({
+            walletAddress: autonomy.ownerWallet,
+            sessionPublicKey: autonomy.signer.publicKey,
+          });
+          onChain = {
+            vault_state: status.state,
+            session_public_key: status.session?.session_public_key ?? null,
+            session_state: status.session?.state ?? "absent",
+            market_execution_ready: status.session?.market_execution_ready ?? false,
+            expires_at_ms: status.session?.expires_at_ms ?? null,
+            clock_skew_ms: status.server_time_ms - nowMs(),
+          };
+        } catch (error) {
+          runtimeError ??= safeMessage(error);
+        }
+      }
       const spentToday = autonomy.dailyBudget.spentToday(nowMs());
       const state = {
         session_configured: true,
@@ -2917,6 +3386,32 @@ function registerAutonomyTools(
             ? null
             : Number(Math.max(0, config.maxUsdPerDay - spentToday).toFixed(2)),
         allowed_market_ids: config.allowedMarketIds ?? null,
+        runtime: {
+          mcp_version: SERVER_VERSION,
+          tool_mode: toolMode,
+          credential_source: credential.source,
+          credentials_file: credential.credentials_file,
+          loaded_session_public_key: autonomy.signer.publicKey,
+          credential_file_session_public_key: credential.credential_file_session_public_key,
+          session_key_consistent:
+            credential.source === "file"
+              ? credential.credential_file_session_public_key === autonomy.signer.publicKey
+              : credential.source === "environment"
+                ? true
+                : null,
+          on_chain: onChain,
+          trading_tools_usable:
+            onChain === null
+              ? null
+              : onChain.vault_state === "active"
+                && onChain.session_state === "active"
+                && onChain.market_execution_ready === true
+                && onChain.session_public_key === autonomy.signer.publicKey,
+          diagnostic_error: runtimeError,
+          credential_reload_supported: true,
+          credential_restart_required: false,
+          package_upgrade_requires_process_restart: true,
+        },
         how_to_change: howToChange,
       };
       const summary =
@@ -2929,8 +3424,6 @@ function registerAutonomyTools(
       return toolResult(state, summary);
     },
   );
-
-  if (!autonomy) return;
 
   const resolver = new MarketMetaResolver(
     platformClient,
@@ -2947,6 +3440,11 @@ function registerAutonomyTools(
   };
   const refuse = (reason: string, prepared: unknown, summary: string) =>
     toolResult({ executed: false, reason, prepared }, summary);
+  const tradingNotConnected = () => toolError(
+    "trading_not_connected",
+    "Trading is not connected. Run strata-mcp connect; this running MCP will pick up the private credential automatically.",
+    false,
+  );
 
   // ── one-shot existing IntentBook seat control ──────────────────────────────
   registerTool(
@@ -2973,6 +3471,8 @@ function registerAutonomyTools(
       },
     },
     async (args) => guardedTool(client, "mm.intent.manage", async () => {
+      const autonomy = await autonomyProvider();
+      if (!autonomy) return tradingNotConnected();
       let operation: PlatformMakerIntentExecuteOperation;
       if (args.action === "revoke") {
         operation = { action: "revoke", ownerWallet: autonomy.ownerWallet };
@@ -3045,6 +3545,8 @@ function registerAutonomyTools(
     },
     async (args) =>
       guardedTool(client, "trade.submit", async () => {
+        const autonomy = await autonomyProvider();
+        if (!autonomy) return tradingNotConnected();
         const quote: QuoteResponse = await retryReadOnce(() => client.quote({
           market: args.market,
           side: args.side,
@@ -3087,17 +3589,27 @@ function registerAutonomyTools(
     {
       title: "Execute a Strata order control",
       description:
-        "Place, cancel, replace, or batch orders and, within the autonomy slider, sign with the session "
-        + "key and submit in one call. Owner wallet and session key come from the configured session. "
-        + "Under \"ask\" (or over a \"limits\" ceiling) it prepares the transaction and asks you to sign.",
+        "Place a human limit order such as 'sell 10% of available SOL at mark +3%' in one call, or use "
+        + "the exact-atom cancel/replace/batch controls. Strata resolves the balance, market, mark, decimals "
+        + "and tick grid internally. Autonomous placements keep a warm dead-man guard; if it cannot be "
+        + "established, the new order is cancelled fail-closed.",
       inputSchema: {
-        marketId: z.string().regex(/^market_[0-9a-f]{32}$/),
+        market: z.string().min(1).max(128).optional()
+          .describe("Friendly market label such as SOL/USDC (also accepts a market ID)."),
+        marketId: z.string().regex(/^market_[0-9a-f]{32}$/).optional()
+          .describe("Advanced alternative to market."),
         action: z.enum(["place", "cancel", "cancel_all", "replace", "batch"]),
         clientOrderId: z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
         side: z.enum(["buy", "sell"]).optional(),
         orderType: z.enum(["good_until_cancelled", "post_only"]).optional(),
         limitPriceAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
         sizeAtoms: z.string().regex(/^[1-9][0-9]*$/).max(20).optional(),
+        availablePercent: z.number().positive().max(100).optional()
+          .describe("Friendly placement size: percentage of available input balance, for example 10."),
+        markOffsetBps: z.number().int().min(-9_999).max(100_000).optional()
+          .describe("Signed offset from the current mark in basis points; +300 is 3% above mark."),
+        deadManTimeoutMs: z.number().int().min(1_000).max(30_000).optional()
+          .describe("Guard timeout for an autonomous placement; friendly orders default to 10000ms."),
         orderId: z.string().regex(/^order_[0-9a-f]{32}$/).optional(),
         operations: z.array(z.object({
           action: z.enum(["place", "cancel", "replace"]),
@@ -3119,34 +3631,158 @@ function registerAutonomyTools(
     },
     async (args) =>
       guardedTool(client, "orders.submit", async () => {
+        const autonomy = await autonomyProvider();
+        if (!autonomy) return tradingNotConnected();
+        const friendly = args.availablePercent !== undefined || args.markOffsetBps !== undefined;
+        let resolved: ResolvedFriendlyOrder | null = null;
+        let marketId = args.marketId;
+        let clientOrderId = args.clientOrderId;
+        let side = args.side;
+        let orderType = args.orderType;
+        let limitPriceAtoms = args.limitPriceAtoms;
+        let sizeAtoms = args.sizeAtoms;
+
+        if (friendly) {
+          if (
+            args.action !== "place"
+            || args.market === undefined
+            || args.side === undefined
+            || args.availablePercent === undefined
+            || args.limitPriceAtoms !== undefined
+            || args.sizeAtoms !== undefined
+            || args.marketId !== undefined
+          ) {
+            return toolError(
+              "invalid_order_intent",
+              "Friendly placement requires action=place, market, side and availablePercent; omit marketId, limitPriceAtoms and sizeAtoms.",
+              false,
+            );
+          }
+          try {
+            resolved = await resolveFriendlyOrderIntent(platformClient, autonomy, {
+              market: args.market,
+              side: args.side,
+              availablePercent: args.availablePercent,
+              markOffsetBps: args.markOffsetBps ?? 0,
+              ...(args.clientOrderId === undefined ? {} : { clientOrderId: args.clientOrderId }),
+              ...(args.orderType === undefined ? {} : { orderType: args.orderType }),
+            }, nowMs);
+          } catch (error) {
+            if (error instanceof StrataApiError) throw error;
+            return toolError("order_intent_unavailable", safeMessage(error), true);
+          }
+          marketId = resolved.marketId;
+          clientOrderId = resolved.clientOrderId;
+          side = resolved.side;
+          orderType = resolved.orderType;
+          limitPriceAtoms = resolved.limitPriceAtoms;
+          sizeAtoms = resolved.sizeAtoms;
+        } else if (marketId === undefined && args.market !== undefined) {
+          try {
+            marketId = (await platformClient.markets.resolve(args.market)).market_id;
+          } catch (error) {
+            if (error instanceof StrataApiError) throw error;
+            return toolError("market_unavailable", safeMessage(error), true);
+          }
+        }
+        if (marketId === undefined) {
+          return toolError("invalid_request", "Give market or marketId.", false);
+        }
+
         const challenge = orderOperationFromArgs({
-          ...args,
+          action: args.action,
+          ...(clientOrderId === undefined ? {} : { clientOrderId }),
+          ...(side === undefined ? {} : { side }),
+          ...(orderType === undefined ? {} : { orderType }),
+          ...(limitPriceAtoms === undefined ? {} : { limitPriceAtoms }),
+          ...(sizeAtoms === undefined ? {} : { sizeAtoms }),
+          ...(args.orderId === undefined ? {} : { orderId: args.orderId }),
+          ...(args.operations === undefined ? {} : { operations: args.operations }),
           ownerWallet: autonomy.ownerWallet,
           sessionPublicKey: autonomy.signer.publicKey,
         });
         if ("content" in challenge) return challenge;
         // A place/replace risks new base; a cancel reduces it (notional 0).
         const baseAtoms =
-          (args.action === "place" || args.action === "replace") && args.sizeAtoms !== undefined
-            ? BigInt(args.sizeAtoms)
+          (args.action === "place" || args.action === "replace") && sizeAtoms !== undefined
+            ? BigInt(sizeAtoms)
             : 0n;
-        const notional = await estimateBaseNotionalUsd(resolver, markFor, args.marketId, baseAtoms);
-        const decision = decideAutonomy(autonomy, args.marketId, notional, nowMs());
+        const notional = resolved?.notionalUsd
+          ?? await estimateBaseNotionalUsd(resolver, markFor, marketId, baseAtoms);
+        const decision = decideAutonomy(autonomy, marketId, notional, nowMs());
         if (!decision.allow) {
-          const prepared = await platformClient.orders.prepare(args.marketId, {
+          const prepared = await platformClient.orders.prepare(marketId, {
             operation: challenge,
           });
-          return refuse(decision.reason, prepared, decision.reason);
+          return toolResult(
+            {
+              executed: false,
+              reason: decision.reason,
+              prepared,
+              ...(resolved === null ? {} : { resolved_intent: resolved.resolution }),
+            },
+            decision.reason,
+          );
         }
         const { sessionPublicKey: _session, ...operation } = challenge;
-        const receipt = await platformClient.orders.execute(args.marketId, {
+        const idempotencyKey = args.idempotencyKey ?? clientOrderId ?? `mcp-${nowMs().toString(36)}`;
+        if (args.action === "place" && (friendly || args.deadManTimeoutMs !== undefined)) {
+          if (!persistentOrderGuards) {
+            return toolError(
+              "persistent_guard_unavailable",
+              "Autonomous resting orders require a persistent stdio MCP runtime so dead-man heartbeats continue after this call.",
+              false,
+            );
+          }
+          const connection = await orderConnections.get(marketId, autonomy);
+          const guarded = await executeGuardedOrder(
+            connection,
+            autonomy,
+            operation as Extract<PlatformOrderExecuteOperation, { action: "place" }>,
+            idempotencyKey,
+            args.deadManTimeoutMs ?? 10_000,
+          );
+          if (!guarded.ok) {
+            return toolError(guarded.code, guarded.message, true, undefined, guarded.details);
+          }
+          const lifecycle = await observePlacedOrderLifecycle(
+            platformClient,
+            autonomy.ownerWallet,
+            guarded.receipt.order_ids,
+          );
+          if (notional !== null) autonomy.dailyBudget.record(notional, nowMs());
+          return toolResult(
+            {
+              executed: true,
+              submission_state:
+                guarded.status?.status === "submitted"
+                  ? "confirmed"
+                  : guarded.status?.status ?? "submitted_unverified",
+              order_state: lifecycle.state,
+              receipt: guarded.receipt,
+              order_status: guarded.status,
+              order_status_error: guarded.statusError,
+              lifecycle,
+              dead_man: guarded.deadMan,
+              notional_usd: notional,
+              ...(resolved === null ? {} : { resolved_intent: resolved.resolution }),
+            },
+            `Placed guarded ${side} order ${guarded.receipt.order_ids.join(", ")} as ${guarded.receipt.signature}.`,
+          );
+        }
+        const receipt = await platformClient.orders.execute(marketId, {
           operation: operation as PlatformOrderExecuteOperation,
           signer: autonomy.signer,
-          ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
+          idempotencyKey,
         });
         if (notional !== null) autonomy.dailyBudget.record(notional, nowMs());
         return toolResult(
-          { executed: true, receipt, notional_usd: notional },
+          {
+            executed: true,
+            receipt,
+            notional_usd: notional,
+            ...(resolved === null ? {} : { resolved_intent: resolved.resolution }),
+          },
           `Executed ${receipt.action} control ${receipt.order_control_id} as ${receipt.signature}.`,
         );
       }),
@@ -3182,6 +3818,8 @@ function registerAutonomyTools(
     },
     async (args) =>
       safeTool(async () => {
+        const autonomy = await autonomyProvider();
+        if (!autonomy) return tradingNotConnected();
         let operation: PlatformTwapExecuteOperation;
         if (args.action === "cancel") {
           if (args.twapId === undefined) return toolError("invalid_request", "Cancel requires twapId.", false);
@@ -3314,7 +3952,12 @@ async function guardedTool(
     return await operation();
   } catch (error) {
     if (error instanceof StrataApiError) {
-      return toolError(error.code, friendlyApiError(error.code, error.message), error.retryable);
+      return toolError(
+        error.code,
+        friendlyApiError(error.code, error.message),
+        error.retryable,
+        error.retryAfterMs,
+      );
     }
     return toolError("request_failed", safeMessage(error), true);
   }
@@ -3325,7 +3968,12 @@ async function safeTool(operation: () => Promise<CallToolResult>): Promise<CallT
     return await operation();
   } catch (error) {
     if (error instanceof StrataApiError) {
-      return toolError(error.code, friendlyApiError(error.code, error.message), error.retryable);
+      return toolError(
+        error.code,
+        friendlyApiError(error.code, error.message),
+        error.retryable,
+        error.retryAfterMs,
+      );
     }
     return toolError("request_failed", safeMessage(error), true);
   }
@@ -3337,7 +3985,7 @@ async function retryReadOnce<T>(operation: () => Promise<T>): Promise<T> {
     return await operation();
   } catch (error) {
     if (!(error instanceof StrataApiError) || !error.retryable) throw error;
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise((resolve) => setTimeout(resolve, error.retryAfterMs ?? 150));
     return operation();
   }
 }
@@ -3379,8 +4027,22 @@ function toolResult(value: unknown, summary: string): CallToolResult {
   };
 }
 
-function toolError(code: string, message: string, retryable: boolean): CallToolResult {
-  const error = { error: { code, message, retryable } };
+function toolError(
+  code: string,
+  message: string,
+  retryable: boolean,
+  retryAfterMs?: number,
+  details?: Record<string, unknown>,
+): CallToolResult {
+  const error = {
+    error: {
+      code,
+      message,
+      retryable,
+      ...(retryAfterMs === undefined ? {} : { retry_after_ms: retryAfterMs }),
+      ...(details === undefined ? {} : { details }),
+    },
+  };
   return {
     isError: true,
     content: [{ type: "text", text: JSON.stringify(error) }],

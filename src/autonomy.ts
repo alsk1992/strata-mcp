@@ -51,6 +51,50 @@ export interface SessionAutonomy {
   readonly dailyBudget: DailyUsdBudget;
 }
 
+export type SessionAutonomyProvider = () => Promise<SessionAutonomy | null>;
+
+/**
+ * Build a live session source for long-running MCP hosts. The credential file
+ * may be replaced by `strata-mcp connect` while the stdio process remains
+ * alive, so callers must not close over the first environment snapshot. Daily
+ * spend remains process-local and survives policy/file refreshes for the same
+ * owner + session pair.
+ */
+export function liveSessionAutonomyProvider(
+  loadEnvironment: () => Promise<Record<string, string | undefined>>,
+): SessionAutonomyProvider {
+  let fingerprint: string | null = null;
+  let current: SessionAutonomy | null = null;
+  const budgets = new Map<string, DailyUsdBudget>();
+
+  return async () => {
+    const env = await loadEnvironment();
+    const nextFingerprint = [
+      env.STRATA_OWNER_WALLET ?? "",
+      env.STRATA_SESSION_PUBLIC_KEY ?? "",
+      env.STRATA_SESSION_SECRET_KEY ?? "",
+      env.STRATA_AUTONOMY ?? "",
+      env.STRATA_AUTONOMY_MAX_USD_PER_TRADE ?? "",
+      env.STRATA_AUTONOMY_MAX_USD_PER_DAY ?? "",
+      env.STRATA_AUTONOMY_MARKETS ?? "",
+    ].join("\0");
+    if (fingerprint === nextFingerprint) return current;
+
+    const parsed = await sessionAutonomyFromEnv(env);
+    if (parsed === null) {
+      fingerprint = nextFingerprint;
+      current = null;
+      return null;
+    }
+    const budgetKey = `${parsed.ownerWallet}:${parsed.signer.publicKey}`;
+    const dailyBudget = budgets.get(budgetKey) ?? parsed.dailyBudget;
+    budgets.set(budgetKey, dailyBudget);
+    current = { ...parsed, dailyBudget };
+    fingerprint = nextFingerprint;
+    return current;
+  };
+}
+
 function positiveNumber(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
   const value = Number(raw.trim());

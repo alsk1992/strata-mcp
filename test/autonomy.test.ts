@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { generateSessionKeypair } from "@stratabook/sdk";
 import {
   DailyUsdBudget,
   decideAutonomy,
+  liveSessionAutonomyProvider,
   parseAutonomyConfig,
   quoteNotionalUsd,
   type SessionAutonomy,
@@ -89,6 +91,41 @@ test("daily budget resets across a UTC day boundary", () => {
   budget.record(80, day1);
   assert.equal(budget.spentToday(day1), 80);
   assert.equal(budget.spentToday(day2), 0);
+});
+
+test("live session provider observes credential rotation without resetting the same session budget", async () => {
+  let env: Record<string, string | undefined> = {};
+  const provider = liveSessionAutonomyProvider(async () => ({ ...env }));
+  assert.equal(await provider(), null);
+
+  const [owner, session, replacement] = await Promise.all([
+    generateSessionKeypair(),
+    generateSessionKeypair(),
+    generateSessionKeypair(),
+  ]);
+  env = {
+    STRATA_OWNER_WALLET: owner.publicKey,
+    STRATA_SESSION_PUBLIC_KEY: session.publicKey,
+    STRATA_SESSION_SECRET_KEY: session.secretKey,
+    STRATA_AUTONOMY: "instant",
+  };
+  const first = await provider();
+  assert.equal(first?.signer.publicKey, session.publicKey);
+  first?.dailyBudget.record(12, FIXED_MS);
+
+  env = { ...env, STRATA_AUTONOMY: "limits", STRATA_AUTONOMY_MAX_USD_PER_DAY: "50" };
+  const policyRefresh = await provider();
+  assert.equal(policyRefresh?.config.level, "limits");
+  assert.equal(policyRefresh?.dailyBudget.spentToday(FIXED_MS), 12);
+
+  env = {
+    ...env,
+    STRATA_SESSION_PUBLIC_KEY: replacement.publicKey,
+    STRATA_SESSION_SECRET_KEY: replacement.secretKey,
+  };
+  const rotated = await provider();
+  assert.equal(rotated?.signer.publicKey, replacement.publicKey);
+  assert.equal(rotated?.dailyBudget.spentToday(FIXED_MS), 0);
 });
 
 test("quoteNotionalUsd uses the quote-asset side of the trade", () => {

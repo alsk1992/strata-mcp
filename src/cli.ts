@@ -9,13 +9,22 @@ import {
   STRATA_ACTION_GRAPH,
   STRATA_AGENT_HARNESS,
 } from "./generated-harness.js";
-import { createStrataMcpServer, probeStrataMcpReadiness } from "./server.js";
-import { sessionAutonomyFromEnv } from "./autonomy.js";
+import {
+  createStrataMcpServer,
+  probeStrataMcpReadiness,
+  type SessionCredentialDiagnostics,
+} from "./server.js";
+import {
+  liveSessionAutonomyProvider,
+  sessionAutonomyFromEnv,
+  type SessionAutonomyProvider,
+} from "./autonomy.js";
 import { SERVER_VERSION } from "./version.js";
 import { friendlyApiError, humanQuoteAmount, parseToolMode, type StrataMcpToolMode } from "./usability.js";
 import {
   DEFAULT_PAIRING_WEB_BASE,
   loadTradingEnvironment,
+  readTradingConnection,
   runLocalPairing,
   tradingCredentialsPath,
 } from "./pairing.js";
@@ -32,6 +41,9 @@ interface Options {
   webBase: string;
   credentialsFile?: string;
   sessionAutonomy?: NonNullable<Awaited<ReturnType<typeof sessionAutonomyFromEnv>>>;
+  sessionAutonomyProvider?: SessionAutonomyProvider;
+  sessionCredentialDiagnostics?: () => Promise<SessionCredentialDiagnostics>;
+  persistentOrderGuards?: boolean;
 }
 
 function parse(argv: string[]): Options {
@@ -282,13 +294,37 @@ async function main(): Promise<void> {
     });
     return;
   }
-  const sessionEnv = await loadTradingEnvironment(process.env);
+  const runtimeEnvironment: Record<string, string | undefined> = options.credentialsFile === undefined
+    ? { ...process.env }
+    : { ...process.env, STRATA_MCP_CREDENTIALS_FILE: options.credentialsFile };
+  const sessionEnv = await loadTradingEnvironment(runtimeEnvironment);
   if (options.command === "doctor") {
     await runDoctor(options, sessionEnv);
     return;
   }
-  const sessionAutonomy = await sessionAutonomyFromEnv(sessionEnv);
-  const withSession: Options = sessionAutonomy ? { ...options, sessionAutonomy } : options;
+  const sessionAutonomyProvider = liveSessionAutonomyProvider(
+    () => loadTradingEnvironment(runtimeEnvironment),
+  );
+  const sessionAutonomy = await sessionAutonomyProvider();
+  const sessionCredentialDiagnostics = async (): Promise<SessionCredentialDiagnostics> => {
+    const path = tradingCredentialsPath(runtimeEnvironment);
+    const stored = await readTradingConnection(path);
+    const explicit = Boolean(
+      runtimeEnvironment.STRATA_SESSION_SECRET_KEY || runtimeEnvironment.STRATA_OWNER_WALLET,
+    );
+    return {
+      source: explicit ? "environment" : stored === null ? "none" : "file",
+      credentials_file: path,
+      credential_file_session_public_key: stored?.session_public_key ?? null,
+    };
+  };
+  const withSession: Options = {
+    ...options,
+    sessionAutonomyProvider,
+    sessionCredentialDiagnostics,
+    persistentOrderGuards: options.transport === "stdio",
+    ...(sessionAutonomy === null ? {} : { sessionAutonomy }),
+  };
   if (sessionAutonomy) {
     process.stderr.write(
       `[strata-mcp] session autonomy: ${sessionAutonomy.config.level} `

@@ -62,9 +62,11 @@ returns to the live Control Center. Run the same command again to replace the
 old key atomically; the old key is revoked in the same signed transaction.
 
 There is no secret to paste into chat, no environment-variable screen, and no
-client config to edit after the read-only server is installed. Restart or
-refresh the MCP client after the browser confirms connection. Revoke the exact
-session and delete its local credential with:
+client config to edit after the read-only server is installed. A running MCP
+process detects the new, replaced, or removed local credential automatically;
+no client restart is required for credential changes. A package-version upgrade
+still requires the MCP host to launch the new process. Revoke the exact session
+and delete its local credential with:
 
 ```sh
 npx -y @stratabook/mcp disconnect
@@ -106,8 +108,9 @@ The compact default exposes the tools ordinary users need:
 - `strata_quote` — accepts `0.1 SOL`, `20 USDC`, or `$20`; token atoms remain optional
 - `strata_portfolio` and `strata_market_making_status`
 - `strata_trade` — returns a live quote when trading is not connected, with one setup link; follows the user's session limits when connected
+- `strata_order_execute` — understands instructions such as “sell 10% of available SOL at 3% above mark”; resolves exact atoms and tick rounding, submits through a warm order channel, and maintains fail-closed dead-man protection
 - `strata_market_making_prepare` and `strata_market_making_submit_and_wait`
-- `strata_autonomy` — reports whether optional trading is connected and the user's limits
+- `strata_autonomy` — reports the user's limits plus MCP version/mode, loaded and on-chain session consistency, execution readiness, expiry, and clock skew
 
 Advanced mode additionally exposes the complete protocol surface, including:
 
