@@ -194,7 +194,7 @@ export const STRATA_AGENT_HARNESS = {
     },
     {
       "id": "authorize_writes",
-      "instruction": "When prepare and submit are exposed, keep signing external to Strata and use one signature per action: send the operation itself to prepare (orders, TWAP, quote-bound execution), verify the returned transaction, sign only that transaction with the session key, then submit with idempotency. The SDK's built-in verifier decodes the transaction and requires it to be exactly the requested operation for that market with the session co-signing only delegated instructions and never paying; a stricter owner verifier may replace it. The two-step challenge path (authorization bytes signed first) remains available. Resting-order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations. Every incoming resting order selects an explicit self-trade prevention policy; no policy permits a self-fill."
+      "instruction": "When prepare and submit are exposed, keep signing external to Strata and use one signature per action: send the operation itself to prepare (orders, TWAP, quote-bound execution), verify the returned transaction, sign only that transaction with the session key, then submit with idempotency. The SDK's built-in verifier decodes the transaction and requires it to be exactly the requested operation for that market with the session co-signing only delegated instructions and never paying; a stricter owner verifier may replace it. The two-step challenge path (authorization bytes signed first) remains available. Resting-order control supports place, cancel, bounded cancel-all, atomic replace, and atomic heterogeneous batches of up to six operations. Proactive self-trade cancellation is optional and must be activated only when the owner explicitly requests a policy. Omitted policy means normal placement; Strata still prevents actual self-fills."
     },
     {
       "id": "stream_order_commands",
@@ -234,7 +234,7 @@ export const STRATA_AGENT_HARNESS = {
     "Never request or accept wallet secrets, private keys, seed phrases, session keys, or production credentials in a prompt.",
     "Never call undocumented endpoints or reconstruct private Sonar behavior.",
     "Never silently widen the tolerance, refresh changed economics, substitute a market, or retry a non-retryable failure.",
-    "Never select a self-trade policy implicitly, suppress an order-command sequence gap, or disarm a dead-man ticket merely because the client is shutting down.",
+    "Never activate a self-trade cancellation policy without an explicit owner request, suppress an order-command sequence gap, or disarm a dead-man ticket merely because the client is shutting down.",
     "Treat capability removal, revocation, expiry, and emergency disable as immediate stop signals.",
     "Capability and action-graph availability are authoritative for Strata operations; permission and signer policy remain controlled by the external agent owner."
   ]
@@ -569,7 +569,7 @@ export const STRATA_ACTION_GRAPH = {
     {
       "id": "open_order_command_stream",
       "kind": "prepare",
-      "summary": "Authenticate one persistent sequenced order channel for low-latency commands, explicit self-trade policy, and pushed confirmation.",
+      "summary": "Authenticate one persistent sequenced order channel for low-latency commands, optional self-trade cancellation, and pushed confirmation.",
       "required_capabilities": [
         "orders.prepare",
         "orders.submit"
@@ -732,7 +732,7 @@ export const STRATA_ACTION_GRAPH = {
     {
       "from": "open_order_command_stream",
       "to": "request_order_challenge",
-      "condition": "signed socket authentication succeeds and an explicit self-trade prevention policy is selected"
+      "condition": "signed socket authentication succeeds; self-trade cancellation remains off unless the owner explicitly selects a policy"
     },
     {
       "from": "open_order_command_stream",

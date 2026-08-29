@@ -2281,11 +2281,16 @@ test("simple limit-order intent hot-loads a session and keeps a guarded order ch
   let armShouldFail = false;
   let portfolioReads = 0;
   const executedActions: string[] = [];
+  const selectedSelfTradePolicies: string[] = [];
   let channelClosed = false;
   const connection = {
     ready: Promise.resolve(),
-    execute: async (input: { operation: Record<string, unknown> }) => {
+    execute: async (input: {
+      operation: Record<string, unknown>;
+      selfTradePrevention?: string;
+    }) => {
       executedActions.push(String(input.operation.action));
+      selectedSelfTradePolicies.push(input.selfTradePrevention ?? "omitted");
       if (input.operation.action === "place") placed = input.operation;
       return {
         schema_version: 2,
@@ -2427,8 +2432,24 @@ test("simple limit-order intent hot-loads a session and keeps a guarded order ch
     assert.equal(placed?.sizeAtoms, "200000000");
     assert.equal(placed?.limitPriceAtoms, "154500000");
     assert.equal(placed?.orderType, "post_only");
+    assert.equal(selectedSelfTradePolicies[0], "none");
     assert.equal(armedTimeout, 10_000);
     assert.match(JSON.stringify(result.structuredContent), /confirmed_open/);
+
+    const optedIn = await protocolClient.callTool({
+      name: "strata_order_execute",
+      arguments: {
+        action: "place",
+        market: "SOL/USDC",
+        side: "sell",
+        availablePercent: 10,
+        markOffsetBps: 300,
+        clientOrderId: "explicit-stp-case",
+        selfTradePrevention: "cancel_both",
+      },
+    });
+    assert.equal(optedIn.isError, undefined);
+    assert.equal(selectedSelfTradePolicies[1], "cancel_both");
 
     armShouldFail = true;
     const failClosed = await protocolClient.callTool({

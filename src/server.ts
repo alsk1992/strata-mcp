@@ -30,6 +30,7 @@ import {
   type PlatformReferralLinkResponse,
   type PlatformOrderExecuteOperation,
   type PlatformOrderCommandConnection,
+  type PlatformSelfTradePrevention,
   type PlatformTwapExecuteOperation,
 } from "@stratabook/sdk";
 import {
@@ -768,10 +769,15 @@ async function executeGuardedOrder(
   connection: PlatformOrderCommandConnection,
   autonomy: SessionAutonomy,
   operation: Extract<PlatformOrderExecuteOperation, { action: "place" }>,
+  selfTradePrevention: PlatformSelfTradePrevention,
   idempotencyKey: string,
   deadManTimeoutMs: number,
 ): Promise<GuardedOrderOutcome> {
-  const receipt = await connection.execute({ operation, idempotencyKey });
+  const receipt = await connection.execute({
+    operation,
+    selfTradePrevention,
+    idempotencyKey,
+  });
   let status: PlatformOrderStatusResponse | null = null;
   let statusError: string | null = null;
   try {
@@ -3610,6 +3616,14 @@ function registerAutonomyTools(
           .describe("Signed offset from the current mark in basis points; +300 is 3% above mark."),
         deadManTimeoutMs: z.number().int().min(1_000).max(30_000).optional()
           .describe("Guard timeout for an autonomous placement; friendly orders default to 10000ms."),
+        selfTradePrevention: z.enum([
+          "cancel_taker",
+          "cancel_maker",
+          "cancel_both",
+          "skip_own_liquidity",
+        ]).optional().describe(
+          "Optional proactive cancellation policy. Omit it for normal placement; Strata still prevents actual self-fills.",
+        ),
         orderId: z.string().regex(/^order_[0-9a-f]{32}$/).optional(),
         operations: z.array(z.object({
           action: z.enum(["place", "cancel", "replace"]),
@@ -3739,6 +3753,7 @@ function registerAutonomyTools(
             connection,
             autonomy,
             operation as Extract<PlatformOrderExecuteOperation, { action: "place" }>,
+            args.selfTradePrevention ?? "none",
             idempotencyKey,
             args.deadManTimeoutMs ?? 10_000,
           );
@@ -3768,6 +3783,25 @@ function registerAutonomyTools(
               ...(resolved === null ? {} : { resolved_intent: resolved.resolution }),
             },
             `Placed guarded ${side} order ${guarded.receipt.order_ids.join(", ")} as ${guarded.receipt.signature}.`,
+          );
+        }
+        if (args.selfTradePrevention !== undefined) {
+          const connection = await orderConnections.get(marketId, autonomy);
+          const receipt = await connection.execute({
+            operation: operation as PlatformOrderExecuteOperation,
+            selfTradePrevention: args.selfTradePrevention,
+            idempotencyKey,
+          });
+          if (notional !== null) autonomy.dailyBudget.record(notional, nowMs());
+          return toolResult(
+            {
+              executed: true,
+              receipt,
+              self_trade_prevention: args.selfTradePrevention,
+              notional_usd: notional,
+              ...(resolved === null ? {} : { resolved_intent: resolved.resolution }),
+            },
+            `Executed ${receipt.action} control ${receipt.order_control_id} as ${receipt.signature}.`,
           );
         }
         const receipt = await platformClient.orders.execute(marketId, {

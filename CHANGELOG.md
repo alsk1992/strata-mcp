@@ -3,6 +3,15 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.19
+
+- Stop implicitly activating self-trade cancellation for resting orders.
+- Add an optional `selfTradePrevention` selector to `strata_order_execute`;
+  omitted means normal placement, while an explicitly selected policy is
+  applied on the authenticated order channel.
+- Update agent guidance so callers no longer refuse orders merely because the
+  user did not request a cancellation policy.
+
 ## 0.2.18
 
 - Hot-reload locally paired session credentials inside a running MCP process;
