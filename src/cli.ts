@@ -8,6 +8,7 @@ import { DEFAULT_API_BASE, StrataApiError, StrataClient } from "@stratabook/sdk"
 import {
   STRATA_ACTION_GRAPH,
   STRATA_AGENT_HARNESS,
+  STRATA_AGENT_TOOL_REGISTRY,
 } from "./generated-harness.js";
 import {
   createStrataMcpServer,
@@ -20,7 +21,14 @@ import {
   type SessionAutonomyProvider,
 } from "./autonomy.js";
 import { SERVER_VERSION } from "./version.js";
-import { friendlyApiError, humanQuoteAmount, parseToolMode, type StrataMcpToolMode } from "./usability.js";
+import {
+  friendlyApiError,
+  humanQuoteAmount,
+  parseToolMode,
+  parseToolProfile,
+  type StrataMcpToolMode,
+  type StrataMcpToolProfile,
+} from "./usability.js";
 import {
   DEFAULT_PAIRING_WEB_BASE,
   loadTradingEnvironment,
@@ -33,6 +41,7 @@ interface Options {
   command: "serve" | "doctor" | "connect" | "disconnect";
   transport: "stdio" | "http";
   toolMode: StrataMcpToolMode;
+  toolProfile: StrataMcpToolProfile;
   apiBase: string;
   timeoutMs: number;
   host: string;
@@ -93,6 +102,7 @@ function parse(argv: string[]): Options {
     command,
     transport,
     toolMode: parseToolMode(values.get("mode") ?? process.env.STRATA_MCP_MODE),
+    toolProfile: parseToolProfile(values.get("profile") ?? process.env.STRATA_MCP_PROFILE),
     apiBase: values.get("api-base") ?? process.env.STRATA_API_BASE ?? DEFAULT_API_BASE,
     timeoutMs,
     host,
@@ -126,6 +136,7 @@ Usage:
 Options:
   --transport stdio|http   Local stdio by default; Streamable HTTP for hosting
   --mode simple|advanced   Compact direct tools (default) or full protocol tools
+  --profile PROFILE        Hard domain boundary (default: compatible unprofiled surface)
   --api-base URL           Strata public API (default: ${DEFAULT_API_BASE})
   --timeout-ms N           Upstream timeout, 250..60000 (default: 10000)
   --host HOST              HTTP bind host (default: localhost)
@@ -228,11 +239,26 @@ async function runHttp(options: Options): Promise<void> {
       .json(STRATA_ACTION_GRAPH);
   });
 
+  app.get("/.well-known/strata-agent-tools.json", (_request: Request, response: Response) => {
+    response
+      .status(200)
+      .set("Cache-Control", "public, max-age=300")
+      .json(STRATA_AGENT_TOOL_REGISTRY);
+  });
+
   app.post("/mcp", async (request: Request, response: Response) => {
     let runtime: Awaited<ReturnType<typeof createStrataMcpServer>> | undefined;
     let transport: StreamableHTTPServerTransport | undefined;
     try {
-      runtime = await createStrataMcpServer(options);
+      const requestedProfile = httpSelector(request.query.profile, "profile");
+      const requestedMode = httpSelector(request.query.mode, "mode");
+      const toolProfile = requestedProfile === undefined
+        ? options.toolProfile
+        : parseToolProfile(requestedProfile);
+      const toolMode = requestedMode === undefined
+        ? options.toolMode
+        : parseToolMode(requestedMode);
+      runtime = await createStrataMcpServer({ ...options, toolMode, toolProfile });
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,
@@ -246,9 +272,13 @@ async function runHttp(options: Options): Promise<void> {
     } catch (error) {
       process.stderr.write(`[strata-mcp] request failed: ${safeError(error)}\n`);
       if (!response.headersSent) {
-        response.status(500).json({
+        const invalidSelection = error instanceof TypeError
+          && /^(mode|profile) must /.test(error.message);
+        response.status(invalidSelection ? 400 : 500).json({
           jsonrpc: "2.0",
-          error: { code: -32603, message: "Strata MCP request failed." },
+          error: invalidSelection
+            ? { code: -32602, message: "Invalid Strata MCP mode or profile." }
+            : { code: -32603, message: "Strata MCP request failed." },
           id: null,
         });
       }
@@ -275,6 +305,14 @@ async function runHttp(options: Options): Promise<void> {
   };
   process.once("SIGINT", close);
   process.once("SIGTERM", close);
+}
+
+function httpSelector(value: unknown, name: "mode" | "profile"): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`${name} must be one non-empty query value`);
+  }
+  return value;
 }
 
 function safeError(error: unknown): string {

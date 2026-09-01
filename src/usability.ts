@@ -1,33 +1,68 @@
 import type { Market } from "@stratabook/sdk";
+import {
+  STRATA_AGENT_BRANCH_IDS,
+  STRATA_AGENT_TOOL_REGISTRY,
+  type StrataAgentBranchId,
+} from "./generated-harness.js";
 
 export type StrataMcpToolMode = "simple" | "advanced";
+export type StrataMcpToolProfile = "default" | StrataAgentBranchId;
 
 /**
  * The default surface is intentionally small enough for an agent to choose a
  * useful tool directly. `advanced` keeps the complete protocol machinery for
  * integrators that need explicit challenge / prepare / submit control.
  */
-export const SIMPLE_TOOL_NAMES = new Set([
-  "strata_markets",
-  "strata_quote",
-  "strata_book",
-  "strata_trades",
-  "strata_candles",
-  "strata_marks",
-  "strata_portfolio",
-  "strata_market_making_status",
-  "strata_market_making_prepare",
-  "strata_market_making_submit_and_wait",
-  "strata_market_making_intent_execute",
-  "strata_autonomy",
-  "strata_trade",
-  "strata_order_execute",
-]);
+export const STRATA_MCP_TOOL_NAMES = new Set(
+  STRATA_AGENT_TOOL_REGISTRY.tools.map((tool) => tool.name),
+);
+
+export const SIMPLE_TOOL_NAMES = new Set(
+  STRATA_AGENT_TOOL_REGISTRY.default_simple_tools,
+);
+
+const TOOL_PROFILES = new Map(
+  STRATA_AGENT_TOOL_REGISTRY.tools.map((tool) => [tool.name, new Set(tool.profiles)]),
+);
+const TOOL_MODES = new Map(
+  STRATA_AGENT_TOOL_REGISTRY.tools.map((tool) => [tool.name, new Set(tool.modes)]),
+);
+const BRANCH_IDS = new Set<string>(STRATA_AGENT_BRANCH_IDS);
 
 export function parseToolMode(raw: string | undefined): StrataMcpToolMode {
   const value = raw?.trim().toLowerCase() || "simple";
   if (value === "simple" || value === "advanced") return value;
   throw new TypeError("mode must be simple or advanced");
+}
+
+export function parseToolProfile(raw: string | undefined): StrataMcpToolProfile {
+  const value = raw?.trim().toLowerCase() || STRATA_AGENT_TOOL_REGISTRY.default_profile;
+  if (value === "default" || BRANCH_IDS.has(value)) {
+    return value as StrataMcpToolProfile;
+  }
+  throw new TypeError(
+    `profile must be default or one of: ${STRATA_AGENT_BRANCH_IDS.join(", ")}`,
+  );
+}
+
+export function toolAvailableInProfile(name: string, profile: StrataMcpToolProfile): boolean {
+  return profile === "default" || TOOL_PROFILES.get(name)?.has(profile) === true;
+}
+
+/**
+ * The unprofiled simple surface is the stable 15-tool compatibility contract.
+ * Explicit profiles can expose additional simple reads without widening that
+ * default surface.
+ */
+export function toolAvailableInMode(
+  name: string,
+  mode: StrataMcpToolMode,
+  profile: StrataMcpToolProfile,
+): boolean {
+  if (mode === "advanced") return true;
+  return profile === "default"
+    ? SIMPLE_TOOL_NAMES.has(name)
+    : TOOL_MODES.get(name)?.has("simple") === true;
 }
 
 export interface HumanQuoteAmount {

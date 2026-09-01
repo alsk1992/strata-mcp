@@ -48,6 +48,7 @@ import type {
   PlatformMakerStrandPrepareInput,
   PlatformPortfolioHistoryResponse,
   PlatformPortfolioResponse,
+  PlatformPointsResponse,
   PlatformRewardsResponse,
   PlatformReferralsResponse,
   PlatformReferralClaimInput,
@@ -84,9 +85,17 @@ import type {
 } from "@stratabook/sdk";
 import { CONTRACT_VERSION } from "@stratabook/sdk";
 import {
+  STRATA_AGENT_BRANCHES,
+  STRATA_AGENT_BRANCH_URI_PREFIX,
   STRATA_AGENT_HARNESS,
   STRATA_AGENT_HARNESS_INSTRUCTIONS,
   STRATA_AGENT_HARNESS_URI,
+  STRATA_AGENT_KERNEL,
+  STRATA_AGENT_KERNEL_URI,
+  STRATA_AGENT_ROUTER,
+  STRATA_AGENT_ROUTER_URI,
+  STRATA_AGENT_TOOL_REGISTRY,
+  STRATA_AGENT_TOOL_REGISTRY_URI,
   STRATA_ACTION_GRAPH,
   STRATA_ACTION_GRAPH_URI,
 } from "../src/generated-harness.js";
@@ -182,6 +191,7 @@ function platformCatalog(disabled: readonly string[] = []): PlatformDiscoveryRes
   const definitions = [
     ["graphs.read", "read"],
     ["platform.status.read", "read"],
+    ["points.read", "read"],
     ["rewards.read", "read"],
     ["vault.status.read", "read"],
     ["vault.pause", "destructive"],
@@ -285,14 +295,82 @@ test("readiness validates the live contract instead of reporting a shallow liven
 
 test("initialization instructions make read-only use direct and reserve setup for writes", () => {
   assert.doesNotMatch(STRATA_AGENT_HARNESS_INSTRUCTIONS, /Start every objective with strata_capabilities/);
-  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /Call the requested tool directly/);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /Call the requested direct tool/);
   assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /read-only tools work immediately/i);
-  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /no wallet, approval, session key, or environment setup/i);
-  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /never request or accept a session secret in chat/i);
-  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /needed only when the user asks to sign a trading write/i);
-  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /advanced or ambiguous/);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /connection-scoped profile physically limits tools/i);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /never request or accept private keys/i);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /needed only for a requested trading write/i);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /objective is ambiguous/);
   assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /0\.1 SOL/);
-  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /never private keys or seed phrases/i);
+  assert.match(STRATA_AGENT_HARNESS_INSTRUCTIONS, /preparation and RPC broadcast are not settlement/i);
+  assert.ok(Buffer.byteLength(STRATA_AGENT_HARNESS_INSTRUCTIONS) <= 1_536);
+});
+
+test("the canonical registry owns every implemented tool and every branch", () => {
+  const names = STRATA_AGENT_TOOL_REGISTRY.tools.map((tool) => tool.name);
+  assert.equal(names.length, 60);
+  assert.equal(new Set(names).size, names.length);
+  for (const tool of STRATA_AGENT_TOOL_REGISTRY.tools) {
+    assert.ok(tool.profiles.includes(tool.primary_branch));
+  }
+  for (const branchId of Object.keys(STRATA_AGENT_BRANCHES)) {
+    assert.ok(
+      STRATA_AGENT_TOOL_REGISTRY.tools.some((tool) => tool.primary_branch === branchId),
+      `${branchId} must own at least one tool`,
+    );
+  }
+});
+
+test("connection-scoped profiles physically remove unrelated tools", async () => {
+  const fakeClient = {
+    capabilities: async () => catalog(true),
+  } as unknown as StrataClient;
+  const fakePlatformClient = {
+    discovery: { read: async () => platformCatalog() },
+  } as unknown as StrataPlatformClient;
+
+  for (const [toolMode, expected] of [
+    ["simple", ["strata_points", "strata_rewards"]],
+    ["advanced", ["strata_points", "strata_rewards"]],
+  ] as const) {
+    const runtime = await createStrataMcpServer({
+      client: fakeClient,
+      platformClient: fakePlatformClient,
+      toolMode,
+      toolProfile: "points",
+    });
+    const protocolClient = new Client({ name: `points-${toolMode}`, version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    try {
+      await runtime.server.connect(serverTransport);
+      await protocolClient.connect(clientTransport);
+      const listed = await protocolClient.listTools();
+      const names = listed.tools.map((tool) => tool.name).sort();
+      assert.deepEqual(names, expected);
+      assert.ok(Buffer.byteLength(JSON.stringify(listed.tools)) <= 4_096);
+      assert.ok(!names.includes("strata_trade"));
+      assert.ok(!names.includes("strata_vault_withdraw"));
+      const guessed = await protocolClient.callTool({ name: "strata_trade", arguments: {} });
+      assert.equal(guessed.isError, true);
+      assert.match(JSON.stringify(guessed.content), /not found|disabled/i);
+      const start = await protocolClient.getPrompt({
+        name: "strata_start",
+        arguments: { objective: "Read my Points rank." },
+      });
+      assert.match(JSON.stringify(start.messages), /strata_points/);
+      assert.doesNotMatch(JSON.stringify(start.messages), /strata_order_execute/);
+      await assert.rejects(
+        protocolClient.getPrompt({
+          name: "strata_start",
+          arguments: { objective: "Place an order.", branch: "limit_orders" },
+        }),
+        /outside the active points runtime profile/,
+      );
+    } finally {
+      await protocolClient.close();
+      await runtime.close();
+    }
+  }
 });
 
 test("protocol tool discovery and calls obey the current public policy", async () => {
@@ -952,6 +1030,44 @@ test("protocol tool discovery and calls obey the current public policy", async (
     updated_at_ms: 1_785_420_001_000,
   };
   let vaultSubmitRequest: PlatformVaultSubmitInput | undefined;
+  const platformPoints: PlatformPointsResponse = {
+    schema_version: 2,
+    contract_version: "2.0",
+    server_time_ms: 1_788_825_600_000,
+    program_scope: "all_live_markets",
+    season: "Genesis",
+    season_index: 0,
+    season_start_ms: 1_788_134_400_000,
+    genesis_ms: 1_788_134_400_000,
+    genesis_epochs: 6,
+    epoch_index: 1,
+    epoch_in_season: 1,
+    epoch_start_ms: 1_788_739_200_000,
+    epoch_end_ms: 1_789_344_000_000,
+    allocation_finalizes_after_ms: 1_789_345_800_000,
+    balances_include_closed_epochs_only: true,
+    weekly_points_budget: "1000000",
+    weights_bps: { volume: 3000, maker: 5000, bugs: 1500, referrals: 500 },
+    total_wallets: 1,
+    owner: {
+      wallet_address: walletAddress,
+      rank: 1,
+      points: "1250",
+      volume_points: "1000",
+      maker_points: "100",
+      bug_points: "100",
+      referral_points: "50",
+    },
+    standings: [{
+      rank: 1,
+      wallet_address: walletAddress,
+      points: "1250",
+      volume_points: "1000",
+      maker_points: "100",
+      bug_points: "100",
+      referral_points: "50",
+    }],
+  };
   const platformRewards: PlatformRewardsResponse = {
     schema_version: 2,
     contract_version: "2.0",
@@ -1215,6 +1331,9 @@ test("protocol tool discovery and calls obey the current public policy", async (
       },
       submission: async () => ({ ...platformVaultSubmit, status: "confirmed" as const }),
     },
+    points: {
+      read: async () => platformPoints,
+    },
     rewards: {
       read: async () => platformRewards,
     },
@@ -1273,7 +1392,17 @@ test("protocol tool discovery and calls obey the current public policy", async (
     const resources = await protocolClient.listResources();
     assert.deepEqual(
       resources.resources.map((resource) => resource.uri).sort(),
-      [STRATA_ACTION_GRAPH_URI, STRATA_AGENT_HARNESS_URI, STRATA_PLATFORM_GRAPH_URI].sort(),
+      [
+        STRATA_ACTION_GRAPH_URI,
+        STRATA_AGENT_HARNESS_URI,
+        STRATA_AGENT_KERNEL_URI,
+        STRATA_AGENT_ROUTER_URI,
+        STRATA_AGENT_TOOL_REGISTRY_URI,
+        STRATA_PLATFORM_GRAPH_URI,
+        ...Object.keys(STRATA_AGENT_BRANCHES).map(
+          (branchId) => `${STRATA_AGENT_BRANCH_URI_PREFIX}${branchId}/v1`,
+        ),
+      ].sort(),
     );
     const harness = await protocolClient.readResource({ uri: STRATA_AGENT_HARNESS_URI });
     assert.equal(harness.contents.length, 1);
@@ -1281,6 +1410,30 @@ test("protocol tool discovery and calls obey the current public policy", async (
       JSON.parse("text" in harness.contents[0]! ? harness.contents[0]!.text : "{}"),
       STRATA_AGENT_HARNESS,
     );
+    const router = await protocolClient.readResource({ uri: STRATA_AGENT_ROUTER_URI });
+    assert.deepEqual(
+      JSON.parse("text" in router.contents[0]! ? router.contents[0]!.text : "{}"),
+      STRATA_AGENT_ROUTER,
+    );
+    const kernel = await protocolClient.readResource({ uri: STRATA_AGENT_KERNEL_URI });
+    assert.deepEqual(
+      JSON.parse("text" in kernel.contents[0]! ? kernel.contents[0]!.text : "{}"),
+      STRATA_AGENT_KERNEL,
+    );
+    const toolRegistry = await protocolClient.readResource({ uri: STRATA_AGENT_TOOL_REGISTRY_URI });
+    assert.deepEqual(
+      JSON.parse("text" in toolRegistry.contents[0]! ? toolRegistry.contents[0]!.text : "{}"),
+      STRATA_AGENT_TOOL_REGISTRY,
+    );
+    const pointsBranch = await protocolClient.readResource({
+      uri: `${STRATA_AGENT_BRANCH_URI_PREFIX}points/v1`,
+    });
+    const pointsContext = JSON.parse(
+      "text" in pointsBranch.contents[0]! ? pointsBranch.contents[0]!.text : "{}",
+    ) as { branch_id: string; tools: string[] };
+    assert.equal(pointsContext.branch_id, "points");
+    assert.ok(pointsContext.tools.includes("strata_points"));
+    assert.ok(!pointsContext.tools.includes("strata_trade"));
     const graph = await protocolClient.readResource({ uri: STRATA_ACTION_GRAPH_URI });
     assert.deepEqual(
       JSON.parse("text" in graph.contents[0]! ? graph.contents[0]!.text : "{}"),
@@ -1298,8 +1451,15 @@ test("protocol tool discovery and calls obey the current public policy", async (
       name: "strata_start",
       arguments: { objective: "Quote selling 0.1 SOL for USDC." },
     });
-    assert.match(JSON.stringify(start.messages), /Call the requested tool directly/);
+    assert.match(JSON.stringify(start.messages), /initialized Strata safety kernel/);
     assert.match(JSON.stringify(start.messages), /Quote selling 0.1 SOL/);
+    assert.match(JSON.stringify(start.messages), /agent-branch\/market_data\/v1/);
+    const pointsStart = await protocolClient.getPrompt({
+      name: "strata_start",
+      arguments: { objective: "Read my Points rank.", branch: "points" },
+    });
+    assert.match(JSON.stringify(pointsStart.messages), /strata_points/);
+    assert.doesNotMatch(JSON.stringify(pointsStart.messages), /strata_order_execute/);
 
     const initial = await protocolClient.listTools();
     assert.deepEqual(
@@ -1338,6 +1498,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_order_status",
         "strata_order_submit",
         "strata_platform_graph",
+        "strata_points",
         "strata_portfolio",
         "strata_portfolio_history",
         "strata_quote",
@@ -1733,6 +1894,11 @@ test("protocol tool discovery and calls obey the current public policy", async (
       (vaultSubmissionResult.structuredContent as { status: string }).status,
       "confirmed",
     );
+    const pointsResult = await protocolClient.callTool({
+      name: "strata_points",
+      arguments: { walletAddress, limit: 25 },
+    });
+    assert.deepEqual(pointsResult.structuredContent, platformPoints);
     const rewardsResult = await protocolClient.callTool({
       name: "strata_rewards",
       arguments: { walletAddress, limit: 25 },
@@ -2126,6 +2292,7 @@ test("protocol tool discovery and calls obey the current public policy", async (
         "strata_order_status",
         "strata_order_submit",
         "strata_platform_graph",
+        "strata_points",
         "strata_portfolio",
         "strata_portfolio_history",
         "strata_referral_claim",
@@ -2221,7 +2388,8 @@ test("session autonomy adds one-shot execute tools and a read-only slider", asyn
     await runtime.server.connect(serverTransport);
     await protocolClient.connect(clientTransport);
 
-    const names = (await protocolClient.listTools()).tools.map((tool) => tool.name);
+    const listed = await protocolClient.listTools();
+    const names = listed.tools.map((tool) => tool.name);
     for (const expected of [
       "strata_autonomy",
       "strata_order_execute",
@@ -2522,7 +2690,13 @@ test("the default surface stays compact and reports trading as optional", async 
   try {
     await runtime.server.connect(serverTransport);
     await protocolClient.connect(clientTransport);
-    const names = (await protocolClient.listTools()).tools.map((tool) => tool.name);
+    const listed = await protocolClient.listTools();
+    const names = listed.tools.map((tool) => tool.name);
+    assert.ok(names.length <= STRATA_AGENT_TOOL_REGISTRY.default_simple_tools.length);
+    assert.ok(
+      names.every((name) => STRATA_AGENT_TOOL_REGISTRY.default_simple_tools.includes(name)),
+    );
+    assert.ok(Buffer.byteLength(JSON.stringify(listed.tools)) <= 20_000);
     assert.ok(names.includes("strata_autonomy"));
     assert.ok(names.includes("strata_trade"));
     assert.ok(!names.includes("strata_capabilities"));
