@@ -3,6 +3,11 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.22
+
+- Coordinated patch for profile-aware maker conformance. MCP profile boundaries
+  and runtime behavior are unchanged from 0.2.21.
+
 ## 0.2.21
 
 - Add hard MCP profiles through `--profile`, `STRATA_MCP_PROFILE`, or the hosted
