@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://stratabook.app">Trade</a> ·
-  <a href="https://stratabook.org/docs/agent-mcp">Docs</a> ·
+  <a href="https://stratabook.app/docs/agent-mcp">Docs</a> ·
   <a href="https://www.npmjs.com/package/@stratabook/mcp">npm</a> ·
   <a href="https://api.stratabook.app/mcp">Hosted MCP</a>
 </p>
@@ -39,6 +39,16 @@ The default tool mode is deliberately compact. Agents call the requested tool
 directly instead of burning discovery calls before a quote. Use
 `--mode advanced` (or `STRATA_MCP_MODE=advanced`) only when an integration
 needs the explicit challenge / prepare / submit protocol tools.
+
+For the leanest and safest surface, select one domain profile at connection
+time. A profile is a hard boundary: unrelated tools are absent from discovery
+and cannot be called. Local clients use `--profile points` (or
+`STRATA_MCP_PROFILE=points`); hosted clients use
+`https://api.stratabook.app/mcp?profile=points`. Interface mode is independent,
+so `--mode advanced --profile limit_orders` locally, or hosted
+`?mode=advanced&profile=limit_orders`, exposes the complete limit-order protocol
+without TWAP, maker, Points, or owner-admin tools. Omitting both preserves the
+compact compatible surface.
 
 ## Start locally
 
@@ -138,6 +148,7 @@ Advanced mode additionally exposes the complete protocol surface, including:
 - `strata_vault_setup`, `strata_vault_deposit`, `strata_vault_withdraw`, `strata_vault_delegate`, `strata_vault_policy`, `strata_vault_pause` — prepare owner actions with Strata as sponsored fee payer
 - `strata_vault_submit` — submit the owner-signed preparation; Strata pays and broadcasts
 - `strata_vault_submission` — durable outcome of a submission
+- `strata_points` — complete fleet-wide Points program in one read; included in default simple mode
 - `strata_rewards`
 - `strata_referrals`
 - `strata_referral_link` — prepare externally signable consent or submit the signed link
@@ -158,9 +169,15 @@ Advanced mode additionally exposes the complete protocol surface, including:
 
 Every initialization response carries the compact Strata Agent Harness. It
 instructs an agent to call normal read tools directly. The
-server also publishes the complete harness as the
-`strata://agent-harness/v1` resource and provides a `strata_start` prompt for
-applying it to one concrete objective.
+server publishes a lean `strata://agent-router/v1` tree plus one
+`strata://agent-branch/{leaf}/v1` resource per isolated context. The
+`strata_start` prompt accepts an optional branch and includes only that branch;
+without one it includes only the root router. The complete audit surface remains
+available at `strata://agent-harness/v1`.
+Global authority and secret-handling invariants live once at
+`strata://agent-kernel/v1`; branches bind its digest instead of copying it. The
+canonical registered-tool ownership and profile map is available at
+`strata://agent-tool-registry/v1`.
 The live executable topology is also available as
 `strata://action-graph/v1`. The complete entity, operation, and workflow map is
 available as `strata://platform-graph/v2`.

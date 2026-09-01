@@ -3,6 +3,22 @@
 All notable changes to the Strata SDKs (`@stratabook/sdk`, `@stratabook/mcp`,
 and the `strata-sdk` Rust crate) are recorded here. Versions move together.
 
+## 0.2.21
+
+- Add hard MCP profiles through `--profile`, `STRATA_MCP_PROFILE`, or the hosted
+  `profile` query parameter; unrelated tools are absent and cannot be called.
+- Generate the router, branch resources, kernel, and tool registry from one
+  validated source and fail startup when registered tools drift from it.
+- Keep the unprofiled simple surface at its compatible 15 tools while allowing
+  each selected profile to expose its complete relevant read subset.
+
+## 0.2.20
+
+- Add `strata_points` to simple and advanced mode as the fleet-wide Points
+  source of truth.
+- Publish a lean root context router and isolated branch resources; the start
+  prompt loads one selected branch instead of unrelated workflows.
+
 ## 0.2.19
 
 - Stop implicitly activating self-trade cancellation for resting orders.

@@ -43,17 +43,28 @@ import {
 } from "./autonomy.js";
 import * as z from "zod/v4";
 import {
+  STRATA_AGENT_BRANCHES,
+  STRATA_AGENT_BRANCH_URI_PREFIX,
   STRATA_AGENT_HARNESS,
   STRATA_AGENT_HARNESS_INSTRUCTIONS,
   STRATA_AGENT_HARNESS_URI,
+  STRATA_AGENT_KERNEL,
+  STRATA_AGENT_KERNEL_URI,
+  STRATA_AGENT_ROUTER,
+  STRATA_AGENT_ROUTER_URI,
+  STRATA_AGENT_TOOL_REGISTRY,
+  STRATA_AGENT_TOOL_REGISTRY_URI,
   STRATA_ACTION_GRAPH_URI,
 } from "./generated-harness.js";
 import { SERVER_VERSION } from "./version.js";
 import {
-  SIMPLE_TOOL_NAMES,
+  STRATA_MCP_TOOL_NAMES,
   formatAtoms,
   friendlyApiError,
   humanQuoteAmount,
+  toolAvailableInMode,
+  toolAvailableInProfile,
+  type StrataMcpToolProfile,
   type StrataMcpToolMode,
 } from "./usability.js";
 
@@ -64,6 +75,8 @@ export interface StrataMcpOptions {
   platformClient?: StrataPlatformClient;
   /** Compact direct-use tools by default; advanced exposes the full protocol surface. */
   toolMode?: StrataMcpToolMode;
+  /** Connection-scoped domain boundary; default preserves the complete compatible mode surface. */
+  toolProfile?: StrataMcpToolProfile;
   /**
    * When set, the MCP may finish trades itself with this Vault session key,
    * bounded by the user-owned autonomy slider. Absent = the calm default:
@@ -334,6 +347,7 @@ const PLATFORM_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapabilityRequirem
   strata_market_making_intent_execute: { ids: ["mm.intent.manage"] },
   strata_market_making_prepare: { ids: ["mm.strand.manage", "mm.current.manage"], match: "any" },
   strata_market_making_submit_and_wait: { ids: ["mm.strand.manage", "mm.current.manage"], match: "any" },
+  strata_points: { ids: ["points.read"] },
   strata_rewards: { ids: ["rewards.read"] },
   strata_referrals: { ids: ["referrals.read"] },
   strata_referral_link: { ids: ["referrals.link"] },
@@ -965,6 +979,7 @@ export async function createStrataMcpServer(
 ): Promise<StrataMcpRuntime> {
   const client = strataClient(options);
   const toolMode = options.toolMode ?? "simple";
+  const toolProfile = options.toolProfile ?? STRATA_AGENT_TOOL_REGISTRY.default_profile;
   const autonomyForCall: SessionAutonomyProvider = options.sessionAutonomyProvider
     ?? (async () => options.sessionAutonomy ?? null);
   const platformClient = options.platformClient ?? new StrataPlatformClient({
@@ -982,7 +997,7 @@ export async function createStrataMcpServer(
       version: SERVER_VERSION,
     },
     {
-      instructions: STRATA_AGENT_HARNESS_INSTRUCTIONS,
+      instructions: `${STRATA_AGENT_HARNESS_INSTRUCTIONS} Active runtime profile: ${toolProfile}.`,
     },
   );
   const { registerTool, handles: registeredTools } = trackedToolRegistrar(server);
@@ -1004,6 +1019,85 @@ export async function createStrataMcpServer(
       ],
     }),
   );
+
+  server.registerResource(
+    "strata_agent_router",
+    STRATA_AGENT_ROUTER_URI,
+    {
+      title: "Strata Agent Context Router",
+      description: "Small intent tree used to select one branch before loading detailed workflow context.",
+      mimeType: "application/json",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: STRATA_AGENT_ROUTER_URI,
+          mimeType: "application/json",
+          text: JSON.stringify(STRATA_AGENT_ROUTER),
+        },
+      ],
+    }),
+  );
+
+  server.registerResource(
+    "strata_agent_kernel",
+    STRATA_AGENT_KERNEL_URI,
+    {
+      title: "Strata Agent Safety Kernel",
+      description: "Immutable authority, exact-money, stop, and secret-handling invariants.",
+      mimeType: "application/json",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: STRATA_AGENT_KERNEL_URI,
+          mimeType: "application/json",
+          text: JSON.stringify(STRATA_AGENT_KERNEL),
+        },
+      ],
+    }),
+  );
+
+  server.registerResource(
+    "strata_agent_tool_registry",
+    STRATA_AGENT_TOOL_REGISTRY_URI,
+    {
+      title: "Strata Agent Tool Registry",
+      description: "Canonical implemented MCP tools, domain ownership, profiles, modes, and risks.",
+      mimeType: "application/json",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: STRATA_AGENT_TOOL_REGISTRY_URI,
+          mimeType: "application/json",
+          text: JSON.stringify(STRATA_AGENT_TOOL_REGISTRY),
+        },
+      ],
+    }),
+  );
+
+  for (const [branchId, branch] of Object.entries(STRATA_AGENT_BRANCHES)) {
+    const branchUri = `${STRATA_AGENT_BRANCH_URI_PREFIX}${branchId}/v1`;
+    server.registerResource(
+      `strata_agent_branch_${branchId}`,
+      branchUri,
+      {
+        title: `Strata Agent Branch: ${branchId}`,
+        description: branch.summary,
+        mimeType: "application/json",
+      },
+      async () => ({
+        contents: [
+          {
+            uri: branchUri,
+            mimeType: "application/json",
+            text: JSON.stringify(branch),
+          },
+        ],
+      }),
+    );
+  }
 
   server.registerResource(
     "strata_platform_graph",
@@ -1045,6 +1139,10 @@ export async function createStrataMcpServer(
     }),
   );
 
+  const contextBranchIds = Object.keys(STRATA_AGENT_BRANCHES) as [
+    keyof typeof STRATA_AGENT_BRANCHES,
+    ...(keyof typeof STRATA_AGENT_BRANCHES)[],
+  ];
   server.registerPrompt(
     "strata_start",
     {
@@ -1056,20 +1154,36 @@ export async function createStrataMcpServer(
           .min(1)
           .max(2_000)
           .describe("The user's concrete Strata market or quote objective."),
+        branch: z
+          .enum(contextBranchIds)
+          .optional()
+          .describe("One context-router leaf and runtime profile. Omit to receive only the root router."),
       },
     },
-    async ({ objective }) => ({
-      description: "Capability-gated Strata objective",
-      messages: [
-        {
-          role: "user",
-          content: {
-            type: "text",
-            text: `${STRATA_AGENT_HARNESS_INSTRUCTIONS}\n\nObjective: ${objective.trim()}`,
+    async ({ objective, branch }) => {
+      if (toolProfile !== "default" && branch !== undefined && branch !== toolProfile) {
+        throw new TypeError(
+          `branch ${branch} is outside the active ${toolProfile} runtime profile`,
+        );
+      }
+      const selectedBranch = toolProfile === "default" ? branch : toolProfile;
+      return {
+        description: "Capability-gated Strata objective",
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Apply the initialized Strata safety kernel and only this context projection.\n\nContext: ${JSON.stringify(
+                selectedBranch === undefined
+                  ? STRATA_AGENT_ROUTER
+                  : STRATA_AGENT_BRANCHES[selectedBranch],
+              )}\n\nObjective: ${objective.trim()}`,
+            },
           },
-        },
-      ],
-    }),
+        ],
+      };
+    },
   );
 
   registerTool(
@@ -1917,6 +2031,34 @@ export async function createStrataMcpServer(
         response,
         `Vault ${response.action} is ${response.status}`
           + `${response.failure_code ? ` (${response.failure_code})` : ""}.`,
+      );
+    },
+  );
+
+  registerTool(
+    "strata_points",
+    {
+      title: "Strata Points",
+      description: "Read the complete fleet-wide Points program in one request: Season and epoch timing, weekly budget, allocation weights, immutable owner balance and lane breakdown, and bounded standings. All live markets participate; current-week activity remains provisional until the published finalization time.",
+      inputSchema: {
+        walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/).optional(),
+        limit: z.number().int().min(1).max(100).optional().default(25),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ walletAddress, limit }) => {
+      const response = await platformClient.points.read({ walletAddress, limit });
+      const owner = response.owner
+        ? ` Owner has ${response.owner.points} Points${response.owner.rank ? ` at rank ${response.owner.rank}` : ""}.`
+        : "";
+      return toolResult(
+        response,
+        `${response.season} epoch ${response.epoch_index}; ${response.standings.length} standings returned.${owner}`,
       );
     },
   );
@@ -3241,7 +3383,14 @@ export async function createStrataMcpServer(
     makerIntentPrepare,
     makerIntentSubmit,
   ];
-  applyToolAvailability(registeredTools, initialCatalog, initialPlatformCatalog, toolMode);
+  assertRegisteredToolParity(registeredTools);
+  applyToolAvailability(
+    registeredTools,
+    initialCatalog,
+    initialPlatformCatalog,
+    toolMode,
+    toolProfile,
+  );
   let closed = false;
   const refresh = async () => {
     if (closed) return;
@@ -3251,7 +3400,7 @@ export async function createStrataMcpServer(
       autonomyForCall(),
     ]);
     orderConnections.reconcile(autonomy);
-    applyToolAvailability(registeredTools, catalog, platformCatalog, toolMode);
+    applyToolAvailability(registeredTools, catalog, platformCatalog, toolMode, toolProfile);
   };
   const timer = setInterval(() => {
     refresh().catch((error: unknown) => {
@@ -3934,6 +4083,42 @@ function platformCapabilityAvailable(
   );
 }
 
+function assertRegisteredToolParity(handles: ReadonlyMap<string, RegisteredTool>): void {
+  const registered = [...handles.keys()].sort();
+  const expected = [...STRATA_MCP_TOOL_NAMES].sort();
+  const registeredSet = new Set(registered);
+  const expectedSet = new Set(expected);
+  const missing = expected.filter((name) => !registeredSet.has(name));
+  const undeclared = registered.filter((name) => !expectedSet.has(name));
+  if (missing.length > 0 || undeclared.length > 0) {
+    throw new Error(
+      `MCP tool registry drift: missing=${missing.join(",") || "none"}; undeclared=${undeclared.join(",") || "none"}`,
+    );
+  }
+  const definitions = new Map(
+    STRATA_AGENT_TOOL_REGISTRY.tools.map((tool) => [tool.name, tool]),
+  );
+  for (const name of [
+    ...Object.keys(LEGACY_TOOL_CAPABILITIES),
+    ...Object.keys(PLATFORM_TOOL_CAPABILITIES),
+  ]) {
+    if (!definitions.has(name)) {
+      throw new Error(`MCP capability gate is not declared in the tool registry: ${name}`);
+    }
+  }
+  for (const [name, requirement] of Object.entries(PLATFORM_TOOL_CAPABILITIES)) {
+    const declared = definitions.get(name)!;
+    const missingCapabilities = requirement.ids.filter(
+      (id) => !declared.capability_ids.includes(id),
+    );
+    if (missingCapabilities.length > 0) {
+      throw new Error(
+        `MCP tool registry capability drift for ${name}: ${missingCapabilities.join(",")}`,
+      );
+    }
+  }
+}
+
 function requirementAvailable(
   requirement: ToolCapabilityRequirement | undefined,
   available: (id: string) => boolean,
@@ -3949,6 +4134,7 @@ function applyToolAvailability(
   catalog: CapabilityCatalog,
   platformCatalog: PlatformDiscoveryResponse,
   toolMode: StrataMcpToolMode,
+  toolProfile: StrataMcpToolProfile,
 ): void {
   for (const [name, tool] of handles) {
     const legacyAvailable = requirementAvailable(
@@ -3959,8 +4145,9 @@ function applyToolAvailability(
       PLATFORM_TOOL_CAPABILITIES[name],
       (id) => platformCapabilityAvailable(platformCatalog, id),
     );
-    const modeAvailable = toolMode === "advanced" || SIMPLE_TOOL_NAMES.has(name);
-    setToolEnabled(tool, modeAvailable && legacyAvailable && platformAvailable);
+    const modeAvailable = toolAvailableInMode(name, toolMode, toolProfile);
+    const profileAvailable = toolAvailableInProfile(name, toolProfile);
+    setToolEnabled(tool, modeAvailable && profileAvailable && legacyAvailable && platformAvailable);
   }
 }
 

@@ -6,7 +6,11 @@ import {
   friendlyApiError,
   humanQuoteAmount,
   parseToolMode,
+  parseToolProfile,
   resolveMarket,
+  SIMPLE_TOOL_NAMES,
+  toolAvailableInMode,
+  toolAvailableInProfile,
 } from "../src/usability.js";
 
 const solUsdc: Market = {
@@ -24,6 +28,23 @@ test("simple is the default tool mode and advanced is explicit", () => {
   assert.equal(parseToolMode(undefined), "simple");
   assert.equal(parseToolMode(" ADVANCED "), "advanced");
   assert.throws(() => parseToolMode("everything"), /simple or advanced/);
+  assert.equal(SIMPLE_TOOL_NAMES.size, 15);
+  assert.equal(SIMPLE_TOOL_NAMES.has("strata_points"), true);
+  assert.equal(SIMPLE_TOOL_NAMES.has("strata_rewards"), false);
+});
+
+test("tool profiles are exact domain boundaries", () => {
+  assert.equal(parseToolProfile(undefined), "default");
+  assert.equal(parseToolProfile(" POINTS "), "points");
+  assert.throws(() => parseToolProfile("trade"), /profile must be default or one of/);
+  assert.equal(toolAvailableInProfile("strata_points", "points"), true);
+  assert.equal(toolAvailableInProfile("strata_trade", "points"), false);
+  assert.equal(toolAvailableInProfile("strata_trade", "default"), true);
+  assert.equal(toolAvailableInProfile("strata_markets", "limit_orders"), true);
+  assert.equal(toolAvailableInMode("strata_rewards", "simple", "default"), false);
+  assert.equal(toolAvailableInMode("strata_rewards", "simple", "points"), true);
+  assert.equal(toolAvailableInMode("strata_referral_link", "simple", "referrals"), false);
+  assert.equal(toolAvailableInMode("strata_referral_link", "advanced", "referrals"), true);
 });
 
 test("human quote amounts resolve side, symbol, decimals, and friendly market spelling", () => {
